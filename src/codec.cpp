@@ -113,7 +113,7 @@ Block decompress(const EncodedBlock& encoded, const Model& model) {
     }
     const auto& pattern = set.patterns[encoded.pattern_index];
     if (pattern.size() != encoded.original_size ||
-        encoded.dictionary.size() < pattern.rank()) {
+        encoded.dictionary.size() != set.dictionary_size()) {
         throw std::invalid_argument("encoded dictionary is inconsistent with pattern");
     }
     Block output(pattern.size());

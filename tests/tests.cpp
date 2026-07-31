@@ -142,6 +142,12 @@ void test_rtl_generation() {
     check(decompressor.find("block_o[24 +: 8] = dictionary_i[0 +: 8]") !=
               std::string::npos,
           "RTL decompressor emits byte selectors");
+    check(bsel::generate_top_compressor_sv(model).find("target_size_o = 16'd3") !=
+              std::string::npos,
+          "RTL top compressor selects quantized target");
+    check(bsel::generate_top_decompressor_sv(model).find("case (set_id_i)") !=
+              std::string::npos,
+          "RTL top decompressor selects pattern set");
 }
 
 }  // namespace

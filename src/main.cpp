@@ -43,6 +43,17 @@ TargetSpec parse_target(const std::string& text) {
             parse_size(text.substr(second + 1), "metadata bytes")};
 }
 
+bool pattern_count_fits(std::size_t count, std::size_t metadata_bytes) {
+    std::size_t capacity = 1;
+    for (std::size_t i = 0; i < metadata_bytes; ++i) {
+        if (capacity > std::numeric_limits<std::size_t>::max() / 256U) {
+            return true;
+        }
+        capacity *= 256U;
+    }
+    return count <= capacity;
+}
+
 std::vector<std::uint8_t> read_bytes(const std::string& path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
@@ -160,6 +171,9 @@ void command_train(int argc, char** argv) {
     for (const auto& target : targets) {
         if (target.metadata_bytes >= target.size) {
             throw std::runtime_error("metadata must be smaller than target");
+        }
+        if (!pattern_count_fits(target.pattern_count, target.metadata_bytes)) {
+            throw std::runtime_error("requested pattern count exceeds metadata capacity");
         }
         bsel::TrainingConfig config{block_size, target.size - target.metadata_bytes,
                                     target.pattern_count, threshold, selection_mode};
@@ -286,6 +300,9 @@ void command_decompress(int argc, char** argv) {
         if (flag == EOF) {
             throw std::runtime_error("truncated compressed file");
         }
+        if (flag != 0 && flag != 1) {
+            throw std::runtime_error("invalid compressed block flag");
+        }
         bsel::EncodedBlock encoded;
         encoded.original_size = model.block_size;
         encoded.compressed = flag != 0;
@@ -293,6 +310,10 @@ void command_decompress(int argc, char** argv) {
             encoded.set_index = read_integer<std::uint32_t>(input);
             encoded.pattern_index = read_integer<std::uint32_t>(input);
             const auto dictionary_size = read_integer<std::uint32_t>(input);
+            if (encoded.set_index >= model.sets.size() ||
+                dictionary_size != model.sets[encoded.set_index].dictionary_size()) {
+                throw std::runtime_error("invalid compressed dictionary size");
+            }
             encoded.dictionary.resize(dictionary_size);
             input.read(reinterpret_cast<char*>(encoded.dictionary.data()), dictionary_size);
         } else {
@@ -307,6 +328,9 @@ void command_decompress(int argc, char** argv) {
         output.insert(output.end(), block.begin(), block.end());
     }
     const auto tail_size = read_integer<std::uint32_t>(input);
+    if (tail_size >= model.block_size) {
+        throw std::runtime_error("invalid compressed tail size");
+    }
     Block tail(tail_size);
     input.read(reinterpret_cast<char*>(tail.data()), tail_size);
     if (!input || output.size() + tail.size() != original_size) {
