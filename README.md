@@ -76,3 +76,58 @@ fields that are not counted by the paper's cache-block metric.
 For paper-comparable experiments, reserve the middle 10% of each trace for
 testing and train on the remaining 90%. The paper used a frequency threshold
 of 1024 for CPU traces and 16 for GPU traces.
+
+## Runtime Cache-Line Traces
+
+`tools/pin/cacheline_trace.cpp` is an Intel Pin tool that models a set-associative
+LLC and writes the 64-byte memory contents observed on simulated LLC misses.
+This is the trace semantic used by the paper; it is different from splitting
+the benchmark's input file into blocks.
+
+Build the tool from WSL. Pin's compiler wrapper cannot handle spaces in its
+root path, so use the Windows short path for this workspace:
+
+```bash
+cd /mnt/c/Desktop/BYTESE~1/tools/pin
+make TARGET=intel64
+```
+
+Example GAPBS BFS capture, restricted to the `DOBFS` kernel:
+
+```bash
+cd /mnt/c/Desktop/BYTESE~1
+./pin-external-4.3-99850-gce5652921-gcc-linux/pin \
+  -t ./tools/pin/obj-intel64/cacheline_trace.so \
+  -o ./build/bfs-g16-roi.trace \
+  -cache-mb 16 -ways 16 -roi DOBFS -max-blocks 100000 -- \
+  ./gapbs-master/bfs -g 16 -n 1
+```
+
+Important tracer options:
+
+- `-cache-mb`: simulated LLC capacity in MiB.
+- `-ways`: LLC associativity.
+- `-roi`: record only while a routine containing this text is active.
+- `-warmup-misses`: populate the cache but omit early misses from the trace.
+- `-max-blocks`: bound runtime and trace disk usage.
+
+The tracer is a practical user-space reproduction backend. The paper used
+SimNow and an in-house gem5 branch and recorded backing-store contents at the
+memory controller. Reproducing the exact published numbers additionally
+requires the authors' original traces, simulator changes, workloads, and
+commercial 14 nm synthesis library, none of which are distributed with the
+paper.
+
+## RTL Generation
+
+Generate hard-coded SystemVerilog compressor and decompressor modules directly
+from a trained model:
+
+```powershell
+.\build\bsel.exe generate-rtl model.bsel build\rtl
+```
+
+One module pair is emitted per quantized target. The compressor hard-codes
+the byte equality checks and dictionary selectors for every pattern and picks
+the first successful pattern. The decompressor uses the pattern identifier to
+hard-code each output byte's dictionary selector.

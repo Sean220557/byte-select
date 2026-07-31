@@ -1,6 +1,7 @@
 #include "byte_select/codec.hpp"
 #include "byte_select/model_io.hpp"
 #include "byte_select/trainer.hpp"
+#include "byte_select/rtl.hpp"
 
 #include <cstdio>
 #include <iostream>
@@ -128,6 +129,21 @@ void test_model_io() {
           "model serialization round trip");
 }
 
+void test_rtl_generation() {
+    const bsel::Model model{4, {{3, 1, {pattern({0, 0, 1, 0})}}}};
+    const auto compressor = bsel::generate_compressor_sv(model, 0);
+    const auto decompressor = bsel::generate_decompressor_sv(model, 0);
+    check(compressor.find("block_i[8 +: 8] == block_i[0 +: 8]") !=
+              std::string::npos,
+          "RTL compressor emits equality checks");
+    check(compressor.find("dictionary_o[8 +: 8] = block_i[16 +: 8]") !=
+              std::string::npos,
+          "RTL compressor emits dictionary selectors");
+    check(decompressor.find("block_o[24 +: 8] = dictionary_i[0 +: 8]") !=
+              std::string::npos,
+          "RTL decompressor emits byte selectors");
+}
+
 }  // namespace
 
 int main() {
@@ -137,6 +153,7 @@ int main() {
     test_lazy_selection_matches_exhaustive();
     test_codec_and_quantization();
     test_model_io();
+    test_rtl_generation();
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
         return 1;

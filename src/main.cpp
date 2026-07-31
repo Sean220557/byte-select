@@ -1,5 +1,6 @@
 #include "byte_select/codec.hpp"
 #include "byte_select/model_io.hpp"
+#include "byte_select/rtl.hpp"
 #include "byte_select/trainer.hpp"
 
 #include <cstdint>
@@ -315,6 +316,16 @@ void command_decompress(int argc, char** argv) {
     write_bytes(argv[4], output);
 }
 
+void command_generate_rtl(int argc, char** argv) {
+    if (argc != 4) {
+        throw std::runtime_error("usage: bsel generate-rtl MODEL OUTPUT_DIRECTORY");
+    }
+    const auto model = bsel::load_model(argv[2]);
+    bsel::write_rtl(model, argv[3]);
+    std::cout << "generated_rtl_sets=" << model.sets.size()
+              << " output_directory=" << argv[3] << '\n';
+}
+
 void print_usage() {
     std::cout
         << "Byte Select paper reproduction\n"
@@ -324,7 +335,8 @@ void print_usage() {
         << "             [--holdout-middle PERCENT]\n"
         << "  bsel evaluate MODEL INPUT\n"
         << "  bsel compress MODEL INPUT OUTPUT\n"
-        << "  bsel decompress MODEL INPUT OUTPUT\n";
+        << "  bsel decompress MODEL INPUT OUTPUT\n"
+        << "  bsel generate-rtl MODEL OUTPUT_DIRECTORY\n";
 }
 
 }  // namespace
@@ -344,6 +356,8 @@ int main(int argc, char** argv) {
             command_compress(argc, argv);
         } else if (command == "decompress") {
             command_decompress(argc, argv);
+        } else if (command == "generate-rtl") {
+            command_generate_rtl(argc, argv);
         } else {
             throw std::runtime_error("unknown command: " + command);
         }

@@ -10,6 +10,7 @@ add_library(byte_select
     src/trainer.cpp
     src/codec.cpp
     src/model_io.cpp
+    src/rtl.cpp
 )
 target_include_directories(byte_select PUBLIC include)
 
