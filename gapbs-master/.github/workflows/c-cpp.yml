@@ -1,0 +1,17 @@
+name: C/C++ CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+
+    runs-on: ubuntu-slim
+
+    steps:
+    - uses: actions/checkout@v6
+    - name: make
+      run: make -j
+    - name: make test
+      run: make -j test

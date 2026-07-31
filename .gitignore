@@ -1,0 +1,21 @@
+build/
+pin-external-*/
+pin-linux.tar.gz
+tools/pin/obj-*/
+
+# Local paper references
+3462209.pdf
+3462209.txt
+TOMEI-DISSERTATION-2023.pdf
+TOMEI-DISSERTATION-2023.txt
+US10860489.pdf
+US10860489.txt
+
+# GAPBS generated/downloaded graph data
+gapbs-master/benchmark/graphs/raw/
+gapbs-master/benchmark/graphs/lite/
+
+# Common local/editor artifacts
+.DS_Store
+Thumbs.db
+*.log
