@@ -139,14 +139,17 @@ not a comparison against BDI, BPC, or other published codecs.
 ```
 
 `compare` runs published-format **size estimators** against a trained
-Byte-Select model using the model's same target sizes. It currently covers the
-FPC word-prefix format and the BDI Table-2 single-base modes; `hybrid` selects
-the smaller of those two estimates per block. It does not claim to implement
-CPack, BPC, or a complete baseline bitstream/RTL implementation.
+Byte-Select model using the model's same target sizes. It covers the FPC
+word-prefix format, the BDI Table-2 single-base modes, the original C-Pack
+dictionary scheme (Chen et al., TVLSI 18(8), 2010), and Bit-Plane Compression
+(Kim et al., ISCA 2016). `hybrid` selects the smaller of the FPC and BDI
+estimates per block. The estimators report the number of bytes the published
+format would need for each cache line; they are not bitstream encoders and do
+not include cache-line metadata or RTL synthesis numbers.
 
 ```powershell
 .\build\bsel.exe compare bsel256.model test.trace `
-  --baseline fpc --baseline bdi
+  --baseline fpc --baseline bdi --baseline cpack --baseline bpc
 ```
 
 For a collection of workloads, use `compare-list`. It prints each trace's
@@ -157,7 +160,7 @@ the total traffic or storage result:
 
 ```text
 bsel compare-list bsel256.model cpu-a.trace cpu-b.trace gpu.trace \
-  --baseline fpc --baseline bdi --baseline hybrid
+  --baseline fpc --baseline bdi --baseline hybrid --baseline cpack --baseline bpc
 ```
 
 `compare-groups` accepts the same `--group NAME INPUT [INPUT ...]` syntax and
@@ -168,8 +171,17 @@ rows instead weight every full cache line equally.
 The FPC estimator uses the 3-bit-per-word header and zero-payload zero prefix,
 so an all-zero 64-byte line occupies 6B as stated in this paper. The BDI
 estimator follows the Table-2 `Base8/4/2-Delta` sizes and tests whether one
-base has a feasible signed-delta range. These definitions are intentionally
-documented because alternative FPC zero-run and multi-base BDI variants have
+base has a feasible signed-delta range. The C-Pack estimator follows the
+authors' 16-entry (64B) FIFO dictionary with the `zzzz`/`xxxx`/`mmmm`/`mmxx`/
+`zzzx`/`mmmx` patterns, checking the static zero patterns first and emitting
+2-8 metadata bits plus 0-4 data bytes per 4-byte word. The BPC estimator
+implements the paper's Delta-BitPlane-XOR transform, the original-symbol
+encoder for the base word, and the Table-3b plane codes (3-bit single-zero,
+7-bit `2..33` zero runs, all-ones, `DBX!=0 & DBP=0`, two-consecutive-ones,
+single-one, and 1-bit-flag fallback), with `ceil(log2(symbols))`-bit position
+fields that reproduce the published 5-bit fields on the paper's 32-symbol
+blocks. These definitions are intentionally documented because alternative
+FPC zero-run, multi-base BDI, and dictionary/replacement variants have
 different byte counts.
 
 ## Inspect Trained Patterns

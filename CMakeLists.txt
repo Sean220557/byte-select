@@ -127,6 +127,7 @@ add_test(
     COMMAND bsel compare "${BSEL_COMPARE_MODEL}"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/codec.cpp"
             --baseline fpc --baseline bdi --baseline hybrid
+            --baseline cpack --baseline bpc
 )
 set_tests_properties(byte_select_compare PROPERTIES DEPENDS byte_select_compare_train)
 add_test(
@@ -134,7 +135,7 @@ add_test(
     COMMAND bsel compare-groups "${BSEL_COMPARE_MODEL}"
             --group codec "${CMAKE_CURRENT_SOURCE_DIR}/src/codec.cpp"
             --group baseline "${CMAKE_CURRENT_SOURCE_DIR}/src/baseline.cpp"
-            --baseline fpc --baseline bdi
+            --baseline fpc --baseline bdi --baseline cpack --baseline bpc
 )
 set_tests_properties(
     byte_select_compare_groups
@@ -207,6 +208,7 @@ add_test(
             "${CMAKE_CURRENT_SOURCE_DIR}/src/codec.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/baseline.cpp"
             --baseline fpc --baseline bdi --baseline hybrid
+            --baseline cpack --baseline bpc
 )
 set_tests_properties(
     byte_select_compare_list

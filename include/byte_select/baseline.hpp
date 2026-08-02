@@ -12,7 +12,9 @@ namespace bsel {
 enum class BaselineKind {
     Fpc,
     Bdi,
-    HybridBdiFpc
+    HybridBdiFpc,
+    Cpack,
+    Bpc
 };
 
 struct BaselineEvaluation {
@@ -36,6 +38,8 @@ const char* baseline_kind_name(BaselineKind kind);
 // These are size estimators for the published formats, not bitstream encoders.
 std::size_t fpc_encoded_size(const Block& block);
 std::size_t bdi_encoded_size(const Block& block);
+std::size_t cpack_encoded_size(const Block& block);
+std::size_t bpc_encoded_size(const Block& block);
 std::size_t baseline_encoded_size(const Block& block, BaselineKind kind);
 
 BaselineEvaluation evaluate_baseline(const std::vector<Block>& blocks,

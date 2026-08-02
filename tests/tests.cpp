@@ -174,6 +174,49 @@ void test_baseline_size_evaluators() {
     check(bsel::baseline_encoded_size(zeros, bsel::BaselineKind::HybridBdiFpc) == 1 &&
               bsel::parse_baseline_kind("hybrid") == bsel::BaselineKind::HybridBdiFpc,
           "hybrid baseline chooses the smaller published size estimate");
+
+    check(bsel::cpack_encoded_size(zeros) == 4,
+          "C-Pack encodes an all-zero 64-byte line as sixteen 2-bit zero words");
+    bsel::Block repeated64(64, 0);
+    for (std::size_t i = 0; i < 16; ++i) {
+        store_little_endian(repeated64, i * 4, 0x11223344U, 4);
+    }
+    check(bsel::cpack_encoded_size(repeated64) == 16,
+          "C-Pack stores one dictionary miss plus fifteen 6-bit full matches");
+    bsel::Block zzzx64(64, 0);
+    for (std::size_t i = 0; i < 16; ++i) {
+        store_little_endian(zzzx64, i * 4, 0x000000abU, 4);
+    }
+    check(bsel::cpack_encoded_size(zzzx64) == 24,
+          "C-Pack stores a zero-prefixed word as a 4-bit code plus one byte");
+    bsel::Block mmmx8(8, 0);
+    store_little_endian(mmmx8, 0, 0x11223300U, 4);
+    store_little_endian(mmmx8, 4, 0x11223344U, 4);
+    check(bsel::cpack_encoded_size(mmmx8) == 7,
+          "C-Pack uses the 16-bit mmmx pattern for an upper-byte dictionary match");
+    bsel::Block mmxx8(8, 0);
+    store_little_endian(mmxx8, 0, 0x11220000U, 4);
+    store_little_endian(mmxx8, 4, 0x11223344U, 4);
+    check(bsel::cpack_encoded_size(mmxx8) == 8,
+          "C-Pack uses the 24-bit mmxx pattern for a half-word dictionary match");
+
+    check(bsel::bpc_encoded_size(zeros) == 2,
+          "BPC encodes an all-zero 64-byte line as a 3-bit base and a 7-bit zero run");
+    check(bsel::bpc_encoded_size(repeated64) == 5,
+          "BPC keeps the base word and run-length encodes the all-zero planes");
+    bsel::Block sequential_words64(64, 0);
+    for (std::size_t i = 0; i < 16; ++i) {
+        store_little_endian(sequential_words64, i * 4, 0x1000U + i, 4);
+    }
+    check(bsel::bpc_encoded_size(sequential_words64) == 4,
+          "BPC encodes a one-delta sequence as a 16-bit base, a zero run, and one all-ones plane");
+    check(bsel::cpack_encoded_size(raw) == 64 && bsel::bpc_encoded_size(raw) == 64,
+          "C-Pack and BPC fall back to an uncompressed random cache line");
+    check(bsel::parse_baseline_kind("cpack") == bsel::BaselineKind::Cpack &&
+              bsel::parse_baseline_kind("bpc") == bsel::BaselineKind::Bpc &&
+              bsel::baseline_encoded_size(zeros, bsel::BaselineKind::Cpack) == 4 &&
+              bsel::baseline_encoded_size(zeros, bsel::BaselineKind::Bpc) == 2,
+          "cpack and bpc baseline kinds parse and route to their estimators");
 }
 
 void test_paper_configs() {
