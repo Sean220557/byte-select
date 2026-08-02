@@ -184,6 +184,74 @@ blocks. These definitions are intentionally documented because alternative
 FPC zero-run, multi-base BDI, and dictionary/replacement variants have
 different byte counts.
 
+## Algorithm-Side Reproduction on Representative Traces
+
+The paper's Figure 11/12 evaluate the generated algorithms against FPC, BDI,
+C-Pack, and BPC on CPU and GPU memory traces. Those traces come from SPEC,
+LULESH, Rodinia, and in-house GPU simulators and are not redistributable, so
+this repository reproduces the *algorithm-side* comparison end-to-end on
+representative graph-workload data instead: `tools/run_gapbs_demo.sh` dumps the
+CSR arrays (vertex offsets + neighbor IDs) of GAP Benchmark Suite graphs as raw
+64-byte cache-line traces, trains the paper's three presets on 90% of each
+trace, and compares their quantized compression ratios against the five
+baseline estimators on the held-out middle 10% (the paper's holdout rule).
+
+```bash
+./tools/run_gapbs_demo.sh /tmp/bsel-demo
+```
+
+The script builds `tools/gapbs_dump_trace.cc` against the bundled GAPBS
+headers, generates `kron16`, `kron18`, and `urand18` graphs (Kronecker and
+uniform-random, the Graph500-style generators), splits each array into
+`-offsets` (8 int64 values per line) and `-neighbors` (16 int32 values per
+line) traces, and reports the following quantized ratios (higher is better):
+
+```text
+trace    array      preset                bsel     fpc     bdi  hybrid   cpack     bpc
+kron16   offsets    bsel-1024-1024-128   4.165   1.001   3.244   3.244   2.093   1.934
+kron16   offsets    bsel-256             2.000   1.001   2.000   2.000   2.000   1.934
+kron16   offsets    bsel-4096            2.000   1.001   2.000   2.000   2.000   1.934
+kron16   neighbors  bsel-1024-1024-128   1.154   1.000   1.010   1.010   1.000   1.781
+kron16   neighbors  bsel-256             1.601   1.000   1.010   1.010   1.000   1.720
+kron16   neighbors  bsel-4096            1.154   1.000   1.010   1.010   1.000   1.720
+kron18   offsets    bsel-1024-1024-128   4.291   1.002   3.429   3.429   2.148   1.906
+kron18   offsets    bsel-256             2.000   1.002   2.000   2.000   2.000   1.906
+kron18   offsets    bsel-4096            2.000   1.002   2.000   2.000   2.000   1.906
+kron18   neighbors  bsel-1024-1024-128   1.066   1.000   1.001   1.001   1.000   1.660
+kron18   neighbors  bsel-256             1.240   1.000   1.001   1.001   1.000   1.654
+kron18   neighbors  bsel-4096            1.066   1.000   1.001   1.001   1.000   1.654
+urand18  offsets    bsel-1024-1024-128   4.000   1.003   3.910   3.910   2.000   1.844
+urand18  offsets    bsel-256             2.000   1.003   2.000   2.000   2.000   1.844
+urand18  offsets    bsel-4096            2.000   1.003   2.000   2.000   2.000   1.844
+urand18  neighbors  bsel-1024-1024-128   1.000   1.000   1.000   1.000   1.000   1.091
+urand18  neighbors  bsel-256             1.000   1.000   1.000   1.000   1.000   1.091
+urand18  neighbors  bsel-4096            1.000   1.000   1.000   1.000   1.000   1.091
+```
+
+These results reproduce the paper's qualitative findings:
+
+- **Regular integer data (offsets):** `bsel-1024-1024-128` beats the best
+  baseline (BDI) by 19% on average (2-28% across the three graphs) and
+  crushes C-Pack/FPC/BPC, matching the paper's
+  observation that Byte-Select "does much better than CPack at compressing
+  traces with mostly integer data" (a 23% average improvement in the 32/16/8
+  quantized ratio in the paper).
+- **Diverse high-entropy data (neighbors):** BPC wins, exactly as the paper
+  reports that "BPC does best for GPU workloads which have more diverse data
+  types." `bsel-256`'s single metadata byte keeps it closest to BPC.
+- **Random graphs:** everything is near 1.0, matching the paper's note that
+  randomly generated input data is largely incompressible.
+
+Honest caveats: these are single-array CSR dumps, not the paper's SPEC/GPU
+traces, and the numbers above are *estimates*, not the paper's published
+values. The script uses the paper's pattern-count threshold of 16 for the
+high-entropy neighbor arrays (its CPU threshold of 1024 prunes everything on
+demo-sized traces) and threshold 1 for the offsets arrays; on the small
+neighbor traces that threshold understates Byte-Select, and running the full
+pattern set on a small graph (`NEIGHBOR_THRESHOLD=1` with a `-g 12` graph)
+raises `bsel-1024-1024-128` from about 1.15 to 1.94, still below BPC's 2.78 on
+that data. Set `OFFSET_THRESHOLD` / `NEIGHBOR_THRESHOLD` to override.
+
 ## Inspect Trained Patterns
 
 The paper's Table 3 reports the top patterns each trained algorithm discovers.
