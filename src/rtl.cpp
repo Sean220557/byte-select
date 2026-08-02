@@ -31,16 +31,6 @@ std::string module_suffix(std::size_t index) {
     return "_s" + std::to_string(index);
 }
 
-std::size_t bits_for(std::size_t values) {
-    std::size_t bits = 0;
-    std::size_t maximum = values > 0 ? values - 1 : 0;
-    do {
-        ++bits;
-        maximum >>= 1U;
-    } while (maximum != 0);
-    return bits;
-}
-
 void ensure_directory(const std::string& path) {
 #ifdef _WIN32
     const int result = _mkdir(path.c_str());
@@ -86,7 +76,8 @@ std::string generate_compressor_sv(const Model& model, std::size_t set_index) {
         }
         out << ")) begin\n"
             << "      success_o = 1'b1;\n"
-            << "      pattern_id_o = " << id_bits << "'d" << p << ";\n";
+            << "      pattern_id_o = " << id_bits << "'d"
+            << encode_pattern_metadata(set, p) << ";\n";
         for (std::size_t symbol = 0; symbol < pattern.rank(); ++symbol) {
             out << "      dictionary_o[" << symbol * 8
                 << " +: 8] = block_i[" << first[symbol] * 8 << " +: 8];\n";
@@ -117,7 +108,8 @@ std::string generate_decompressor_sv(const Model& model, std::size_t set_index) 
         << "    valid_o = 1'b1;\n"
         << "    case (pattern_id_i)\n";
     for (std::size_t p = 0; p < set.patterns.size(); ++p) {
-        out << "      " << id_bits << "'d" << p << ": begin\n";
+        out << "      " << id_bits << "'d" << encode_pattern_metadata(set, p)
+            << ": begin\n";
         const auto& pattern = set.patterns[p];
         for (std::size_t i = 0; i < pattern.size(); ++i) {
             out << "        block_o[" << i * 8 << " +: 8] = dictionary_i["
@@ -133,7 +125,6 @@ std::string generate_decompressor_sv(const Model& model, std::size_t set_index) 
 
 std::string generate_top_compressor_sv(const Model& model) {
     validate_model(model);
-    const auto set_bits = bits_for(model.sets.size());
     std::size_t max_id_bits = 0;
     std::size_t max_dictionary_bytes = 0;
     for (const auto& set : model.sets) {
@@ -153,7 +144,6 @@ std::string generate_top_compressor_sv(const Model& model) {
     out << "module bsel_compressor_top (\n"
         << "  input logic [" << model.block_size * 8 - 1 << ":0] block_i,\n"
         << "  output logic success_o,\n"
-        << "  output logic [" << set_bits - 1 << ":0] set_id_o,\n"
         << "  output logic [" << max_id_bits - 1 << ":0] pattern_id_o,\n"
         << "  output logic [" << max_dictionary_bytes * 8 - 1
         << ":0] dictionary_o,\n"
@@ -173,7 +163,6 @@ std::string generate_top_compressor_sv(const Model& model) {
     }
     out << "  always_comb begin\n"
         << "    success_o = 1'b0;\n"
-        << "    set_id_o = '0;\n"
         << "    pattern_id_o = '0;\n"
         << "    dictionary_o = '0;\n"
         << "    target_size_o = " << model.block_size << ";\n";
@@ -181,7 +170,6 @@ std::string generate_top_compressor_sv(const Model& model) {
         const auto& set = model.sets[i];
         out << "    if (!success_o && success_" << i << ") begin\n"
             << "      success_o = 1'b1;\n"
-            << "      set_id_o = " << set_bits << "'d" << i << ";\n"
             << "      pattern_id_o[" << set.metadata_bytes * 8 - 1
             << ":0] = pattern_id_" << i << ";\n"
             << "      dictionary_o[" << set.dictionary_size() * 8 - 1
@@ -195,7 +183,6 @@ std::string generate_top_compressor_sv(const Model& model) {
 
 std::string generate_top_decompressor_sv(const Model& model) {
     validate_model(model);
-    const auto set_bits = bits_for(model.sets.size());
     std::size_t max_id_bits = 0;
     std::size_t max_dictionary_bytes = 0;
     for (const auto& set : model.sets) {
@@ -205,7 +192,7 @@ std::string generate_top_decompressor_sv(const Model& model) {
     }
     std::ostringstream out;
     out << "module bsel_decompressor_top (\n"
-        << "  input logic [" << set_bits - 1 << ":0] set_id_i,\n"
+        << "  input logic [15:0] target_size_i,\n"
         << "  input logic [" << max_id_bits - 1 << ":0] pattern_id_i,\n"
         << "  input logic [" << max_dictionary_bytes * 8 - 1
         << ":0] dictionary_i,\n"
@@ -225,10 +212,11 @@ std::string generate_top_decompressor_sv(const Model& model) {
     out << "  always_comb begin\n"
         << "    block_o = '0;\n"
         << "    valid_o = 1'b0;\n"
-        << "    case (set_id_i)\n";
+        << "    case (target_size_i)\n";
     for (std::size_t i = 0; i < model.sets.size(); ++i) {
-        out << "      " << set_bits << "'d" << i << ": begin block_o = block_"
-            << i << "; valid_o = valid_" << i << "; end\n";
+        out << "      16'd" << model.sets[i].target_size
+            << ": begin block_o = block_" << i << "; valid_o = valid_" << i
+            << "; end\n";
     }
     out << "      default: begin block_o = '0; valid_o = 1'b0; end\n"
         << "    endcase\n"

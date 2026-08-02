@@ -49,6 +49,9 @@ Pattern Pattern::parse(const std::string& text) {
         }
         symbols.push_back(static_cast<std::uint16_t>(value));
     }
+    if (!input.eof()) {
+        throw std::runtime_error("invalid pattern");
+    }
     if (symbols.empty() && !text.empty()) {
         throw std::runtime_error("invalid pattern");
     }

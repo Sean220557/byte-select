@@ -124,19 +124,24 @@ TrainedPatterns Trainer::train_counts(const CountMap& counts) const {
     TrainedPatterns result;
     result.stats.distinct_patterns = counts.size();
 
-    // Phase 1: retain frequent simplest patterns.
+    // Phase 1: retain frequent simplest patterns. Rank filtering is the
+    // first operation in phase 2 in the paper, so report it separately.
     CountMap atoms;
     for (const auto& [pattern, count] : counts) {
         if (pattern.size() != config_.block_size) {
             throw std::invalid_argument("counted pattern has incorrect block size");
         }
-        if (count >= config_.frequency_threshold &&
-            pattern.rank() <= config_.dictionary_size) {
-            atoms.emplace(pattern, count);
-            result.stats.represented_blocks += count;
+        if (count < config_.frequency_threshold) {
+            continue;
         }
+        ++result.stats.after_frequency_filter;
+        if (pattern.rank() > config_.dictionary_size) {
+            continue;
+        }
+        atoms.emplace(pattern, count);
+        result.stats.represented_blocks += count;
     }
-    result.stats.after_frequency_filter = atoms.size();
+    result.stats.after_rank_filter = atoms.size();
 
     // Phase 2: keep only maximal patterns while retaining all atoms and counts.
     auto candidates = maximal_patterns(atoms);

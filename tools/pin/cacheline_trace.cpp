@@ -5,14 +5,15 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
 
-constexpr UINT64 kLineSize = 64;
-
 KNOB<std::string> output_path(KNOB_MODE_WRITEONCE, "pintool", "o",
                               "cachelines.bin", "raw cache-line trace output");
+KNOB<UINT32> cache_line_size(KNOB_MODE_WRITEONCE, "pintool", "line-size", "64",
+                            "cache line size in bytes (power of two)");
 KNOB<UINT32> cache_megabytes(KNOB_MODE_WRITEONCE, "pintool", "cache-mb", "16",
                              "simulated LLC capacity in MiB");
 KNOB<UINT32> cache_ways(KNOB_MODE_WRITEONCE, "pintool", "ways", "16",
@@ -33,24 +34,27 @@ struct Entry {
 PIN_LOCK lock;
 std::ofstream output;
 std::vector<Entry> entries;
+std::vector<UINT8> line_bytes;
+UINT64 line_size = 0;
 UINT64 set_count = 0;
 UINT64 clock_value = 0;
 UINT64 accesses = 0;
 UINT64 misses = 0;
 UINT64 recorded = 0;
 UINT64 copy_failures = 0;
-UINT64 roi_depth = 0;
+std::unordered_map<THREADID, UINT64> roi_depths;
 
 VOID enter_roi(THREADID thread_id) {
     PIN_GetLock(&lock, thread_id + 1);
-    ++roi_depth;
+    ++roi_depths[thread_id];
     PIN_ReleaseLock(&lock);
 }
 
 VOID leave_roi(THREADID thread_id) {
     PIN_GetLock(&lock, thread_id + 1);
-    if (roi_depth != 0) {
-        --roi_depth;
+    const auto it = roi_depths.find(thread_id);
+    if (it != roi_depths.end() && --it->second == 0) {
+        roi_depths.erase(it);
     }
     PIN_ReleaseLock(&lock);
 }
@@ -87,33 +91,37 @@ VOID record_access(THREADID thread_id, ADDRINT address, UINT32 size) {
     if (size == 0) {
         return;
     }
-    const UINT64 first_line = static_cast<UINT64>(address) / kLineSize;
-    const UINT64 last_line =
-        (static_cast<UINT64>(address) + static_cast<UINT64>(size) - 1) / kLineSize;
-
-    PIN_GetLock(&lock, thread_id + 1);
-    if (!roi_routine.Value().empty() && roi_depth == 0) {
-        PIN_ReleaseLock(&lock);
+    const UINT64 address_value = static_cast<UINT64>(address);
+    if (static_cast<UINT64>(size) - 1U >
+        std::numeric_limits<UINT64>::max() - address_value) {
         return;
     }
-    for (UINT64 line = first_line; line <= last_line; ++line) {
+    const UINT64 first_line = address_value / line_size;
+    const UINT64 last_line = (address_value + static_cast<UINT64>(size) - 1U) / line_size;
+
+    PIN_GetLock(&lock, thread_id + 1);
+    const bool in_roi = roi_routine.Value().empty() ||
+                        roi_depths.find(thread_id) != roi_depths.end();
+    for (UINT64 line = first_line;; ++line) {
         ++accesses;
-        if (!cache_miss(line)) {
-            continue;
+        if (cache_miss(line)) {
+            ++misses;
+            if (in_roi && misses > warmup_misses.Value() &&
+                recorded < maximum_blocks.Value()) {
+                const ADDRINT line_address = static_cast<ADDRINT>(line * line_size);
+                if (PIN_SafeCopy(line_bytes.data(), reinterpret_cast<const VOID*>(line_address),
+                                 line_size) != line_size) {
+                    ++copy_failures;
+                } else {
+                    output.write(reinterpret_cast<const char*>(line_bytes.data()),
+                                 static_cast<std::streamsize>(line_size));
+                    ++recorded;
+                }
+            }
         }
-        ++misses;
-        if (misses <= warmup_misses.Value() || recorded >= maximum_blocks.Value()) {
-            continue;
+        if (line == last_line) {
+            break;
         }
-        UINT8 bytes[kLineSize];
-        const ADDRINT line_address = static_cast<ADDRINT>(line * kLineSize);
-        if (PIN_SafeCopy(bytes, reinterpret_cast<const VOID*>(line_address),
-                         kLineSize) != kLineSize) {
-            ++copy_failures;
-            continue;
-        }
-        output.write(reinterpret_cast<const char*>(bytes), kLineSize);
-        ++recorded;
     }
     PIN_ReleaseLock(&lock);
 }
@@ -150,7 +158,7 @@ VOID finish(INT32, VOID*) {
 }
 
 INT32 usage() {
-    std::cerr << "Records 64-byte memory contents on simulated LLC misses.\n"
+    std::cerr << "Records cache-line contents on simulated LLC misses.\n"
               << KNOB_BASE::StringKnobSummary() << '\n';
     return 1;
 }
@@ -162,18 +170,28 @@ int main(int argc, char* argv[]) {
     if (PIN_Init(argc, argv)) {
         return usage();
     }
-    if (cache_ways.Value() == 0 || cache_megabytes.Value() == 0) {
-        std::cerr << "cache size and associativity must be non-zero\n";
+    line_size = cache_line_size.Value();
+    if (cache_ways.Value() == 0 || cache_megabytes.Value() == 0 || line_size == 0) {
+        std::cerr << "cache size, associativity, and line size must be non-zero\n";
+        return 1;
+    }
+    if ((line_size & (line_size - 1U)) != 0) {
+        std::cerr << "line size must be a power of two\n";
         return 1;
     }
     const UINT64 line_count =
-        static_cast<UINT64>(cache_megabytes.Value()) * 1024U * 1024U / kLineSize;
+        static_cast<UINT64>(cache_megabytes.Value()) * 1024U * 1024U / line_size;
+    if (line_count % cache_ways.Value() != 0) {
+        std::cerr << "cache line count must be divisible by associativity\n";
+        return 1;
+    }
     set_count = line_count / cache_ways.Value();
     if (set_count == 0) {
         std::cerr << "cache configuration has no sets\n";
         return 1;
     }
     entries.resize(set_count * cache_ways.Value());
+    line_bytes.resize(line_size);
     output.open(output_path.Value().c_str(), std::ios::binary | std::ios::trunc);
     if (!output) {
         std::cerr << "cannot open trace output: " << output_path.Value() << '\n';
