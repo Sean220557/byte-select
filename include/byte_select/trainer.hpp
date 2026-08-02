@@ -26,6 +26,7 @@ struct TrainingStats {
     std::uint64_t blocks_seen = 0;
     std::size_t distinct_patterns = 0;
     std::size_t after_frequency_filter = 0;
+    std::size_t after_rank_filter = 0;
     std::size_t maximal_patterns = 0;
     std::size_t combined_patterns = 0;
     std::uint64_t represented_blocks = 0;

@@ -7,15 +7,17 @@
 namespace bsel {
 
 void save_model(const Model& model, const std::string& path) {
+    validate_model(model);
     std::ofstream output(path);
     if (!output) {
         throw std::runtime_error("cannot open model for writing: " + path);
     }
-    output << "BSEL_MODEL 1\n";
+    output << "BSEL_MODEL 2\n";
     output << "block_size " << model.block_size << '\n';
     output << "sets " << model.sets.size() << '\n';
     for (const auto& set : model.sets) {
         output << "set " << set.target_size << ' ' << set.metadata_bytes << ' '
+               << set.metadata_tag_bits << ' ' << set.metadata_tag_value << ' '
                << set.patterns.size() << '\n';
         for (const auto& pattern : set.patterns) {
             output << "pattern " << pattern.to_string() << '\n';
@@ -31,7 +33,7 @@ Model load_model(const std::string& path) {
     std::string token;
     int version = 0;
     input >> token >> version;
-    if (token != "BSEL_MODEL" || version != 1) {
+    if (token != "BSEL_MODEL" || (version != 1 && version != 2)) {
         throw std::runtime_error("unsupported model format");
     }
     Model model;
@@ -49,7 +51,11 @@ Model load_model(const std::string& path) {
     for (std::size_t i = 0; i < set_count; ++i) {
         PatternSet set;
         std::size_t pattern_count = 0;
-        input >> token >> set.target_size >> set.metadata_bytes >> pattern_count;
+        input >> token >> set.target_size >> set.metadata_bytes;
+        if (version == 2) {
+            input >> set.metadata_tag_bits >> set.metadata_tag_value;
+        }
+        input >> pattern_count;
         if (token != "set") {
             throw std::runtime_error("missing set");
         }
@@ -68,6 +74,11 @@ Model load_model(const std::string& path) {
         }
         model.sets.push_back(std::move(set));
     }
+    input >> std::ws;
+    if (!input.eof()) {
+        throw std::runtime_error("unexpected trailing model data");
+    }
+    validate_model(model);
     return model;
 }
 
