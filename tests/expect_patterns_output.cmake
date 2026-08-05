@@ -27,7 +27,7 @@ foreach(expected IN ITEMS
     "pattern_set index=0 target=32 metadata_bytes=2 dictionary=30 metadata_tag_bits=1 metadata_tag=0 pattern_id_bits=15 patterns=1"
     "pattern_set index=1 target=16 metadata_bytes=2 dictionary=14 metadata_tag_bits=1 metadata_tag=0 pattern_id_bits=15 patterns=1"
     "pattern_set index=2 target=8 metadata_bytes=1 dictionary=7 metadata_tag_bits=1 metadata_tag=1 pattern_id_bits=7 patterns=1"
-    "digits=0111111111111111111111111111111111111111111111111111111111111111"
+    "digits=0122222222222222222222222222222222222222222222222222222222222222"
 )
     string(FIND "${output}" "${expected}" found_index)
     if(found_index EQUAL -1)

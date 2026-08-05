@@ -1,7 +1,19 @@
 build/
+build-*/
+results/
+datasets/
 pin-external-*/
 pin-linux.tar.gz
 tools/pin/obj-*/
+
+# Generated compression artifacts
+*.model
+*.fpcb
+*.fpz
+*.trace
+*.hdf5
+*.f32
+*.zst
 
 # Local paper references
 3462209.pdf

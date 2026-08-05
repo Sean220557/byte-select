@@ -144,8 +144,8 @@ void test_baseline_size_evaluators() {
     for (std::size_t i = 0; i < 8; ++i) {
         store_little_endian(sequential64, i * 8, 0x1000U + i, 8);
     }
-    check(bsel::bdi_encoded_size(sequential64) == 16,
-          "BDI Base8-Delta1 uses an eight-byte base and eight one-byte deltas");
+    check(bsel::bdi_encoded_size(sequential64) == 17,
+          "BDI Base8-Delta1 includes its mode byte, base, and eight deltas");
 
     bsel::Block small_words(64, 0);
     for (std::size_t i = 0; i < 16; ++i) {
@@ -165,11 +165,11 @@ void test_baseline_size_evaluators() {
 
     const auto bdi = bsel::evaluate_baseline({zeros, sequential64, raw},
                                               bsel::BaselineKind::Bdi, {32, 16, 8});
-    check(bdi.original_bytes == 192 && bdi.encoded_bytes == 81 &&
-              bdi.allocated_bytes == 88 && bdi.compressed_blocks == 2,
+    check(bdi.original_bytes == 192 && bdi.encoded_bytes == 82 &&
+              bdi.allocated_bytes == 104 && bdi.compressed_blocks == 2,
           "BDI evaluation separates encoded and quantized sizes");
     check(bdi.target_sizes == std::vector<std::size_t>({8, 16, 32}) &&
-              bdi.target_blocks == std::vector<std::uint64_t>({1, 1, 0}),
+              bdi.target_blocks == std::vector<std::uint64_t>({1, 0, 1}),
           "BDI evaluation attributes blocks to the smallest fitting target");
     check(bsel::baseline_encoded_size(zeros, bsel::BaselineKind::HybridBdiFpc) == 1 &&
               bsel::parse_baseline_kind("hybrid") == bsel::BaselineKind::HybridBdiFpc,
@@ -217,6 +217,70 @@ void test_baseline_size_evaluators() {
               bsel::baseline_encoded_size(zeros, bsel::BaselineKind::Cpack) == 4 &&
               bsel::baseline_encoded_size(zeros, bsel::BaselineKind::Bpc) == 2,
           "cpack and bpc baseline kinds parse and route to their estimators");
+    check(bsel::bdi_decode(bsel::bdi_encode(zeros), zeros.size()) == zeros &&
+              bsel::bdi_decode(bsel::bdi_encode(sequential64), sequential64.size()) == sequential64 &&
+              bsel::bdi_decode(bsel::bdi_encode(raw), raw.size()) == raw,
+          "BDI mode-tagged streams round-trip compressed and raw blocks");
+    check(bsel::cpack_decode(bsel::cpack_encode(zeros), zeros.size()) == zeros &&
+              bsel::cpack_decode(bsel::cpack_encode(repeated64), repeated64.size()) == repeated64 &&
+              bsel::cpack_decode(bsel::cpack_encode(raw), raw.size()) == raw,
+          "C-Pack pattern/dictionary streams round-trip");
+    check(bsel::bpc_decode(bsel::bpc_encode(zeros), zeros.size()) == zeros &&
+              bsel::bpc_decode(bsel::bpc_encode(sequential_words64), sequential_words64.size()) == sequential_words64 &&
+              bsel::bpc_decode(bsel::bpc_encode(raw), raw.size()) == raw,
+          "BPC base/delta/DBX streams round-trip");
+    for (std::uint32_t seed = 1; seed <= 200; ++seed) {
+        bsel::Block fuzz(64);
+        auto value = seed;
+        for (auto& byte : fuzz) {
+            value = value * 1664525U + 1013904223U;
+            byte = static_cast<std::uint8_t>(value >> 24U);
+        }
+        check(bsel::bdi_decode(bsel::bdi_encode(fuzz), fuzz.size()) == fuzz &&
+                  bsel::cpack_decode(bsel::cpack_encode(fuzz), fuzz.size()) == fuzz &&
+                  bsel::bpc_decode(bsel::bpc_encode(fuzz), fuzz.size()) == fuzz,
+              "BDI, C-Pack, and BPC round-trip randomized cache lines");
+    }
+
+    check(bsel::parse_baseline_kind("zstd") == bsel::BaselineKind::Zstd &&
+              bsel::parse_baseline_kind("lz4") == bsel::BaselineKind::Lz4 &&
+              bsel::parse_baseline_kind("lz77-lite") == bsel::BaselineKind::Lz77Lite &&
+              bsel::parse_baseline_kind("huffman") == bsel::BaselineKind::Huffman,
+          "software baseline kinds parse");
+    check(bsel::lz77_lite_encoded_size(zeros) < zeros.size() &&
+              bsel::lz4_encoded_size(zeros) < zeros.size() &&
+              bsel::huffman_encoded_size(zeros) < zeros.size() &&
+              bsel::zstd_encoded_size(zeros) < zeros.size(),
+          "software baselines compress all-zero cache lines");
+    check(bsel::lz77_lite_encoded_size(raw) == raw.size() &&
+              bsel::lz4_encoded_size(raw) == raw.size() &&
+              bsel::huffman_encoded_size(raw) <= raw.size() &&
+              bsel::zstd_encoded_size(raw) <= raw.size(),
+          "software baselines do not expand random cache lines");
+    const auto fpc_stream = bsel::fpc_encode(small_words);
+    const auto lz77_stream = bsel::lz77_lite_encode(repeated64);
+    const auto huffman_stream = bsel::huffman_encode(repeated64);
+    const auto lz4_stream = bsel::lz4_encode(repeated64);
+    const auto zstd_stream = bsel::zstd_encode(repeated64);
+    check(fpc_stream.size() == 22 &&
+              bsel::fpc_decode(fpc_stream, small_words.size()) == small_words,
+          "FPC size comes from a round-trippable tag/payload bitstream");
+    check(lz77_stream.size() < repeated64.size() &&
+              bsel::lz77_lite_decode(lz77_stream, repeated64.size()) == repeated64,
+          "LZ77-lite size comes from a round-trippable LZSS token stream");
+    check(huffman_stream.size() < repeated64.size() &&
+              bsel::huffman_decode(huffman_stream, repeated64.size()) == repeated64,
+          "Huffman size comes from a round-trippable canonical-code bitstream");
+    check(lz4_stream.size() < repeated64.size() &&
+              bsel::lz4_decode(lz4_stream, repeated64.size()) == repeated64,
+          "LZ4 size comes from the reference library's round-trippable block stream");
+    check(zstd_stream.size() < repeated64.size() &&
+              bsel::zstd_decode(zstd_stream, repeated64.size()) == repeated64,
+          "Zstd size comes from the reference library's round-trippable frame");
+    check(bsel::fpc_decode(bsel::fpc_encode(raw), raw.size()) == raw &&
+              bsel::lz77_lite_decode(bsel::lz77_lite_encode(raw), raw.size()) == raw &&
+              bsel::huffman_decode(bsel::huffman_encode(raw), raw.size()) == raw,
+          "real baseline codecs round-trip incompressible data before raw fallback");
 }
 
 void test_paper_configs() {

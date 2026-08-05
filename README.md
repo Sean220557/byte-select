@@ -138,18 +138,22 @@ not a comparison against BDI, BPC, or other published codecs.
   --ideal-metadata-bytes 1
 ```
 
-`compare` runs published-format **size estimators** against a trained
-Byte-Select model using the model's same target sizes. It covers the FPC
-word-prefix format, the BDI Table-2 single-base modes, the original C-Pack
-dictionary scheme (Chen et al., TVLSI 18(8), 2010), and Bit-Plane Compression
-(Kim et al., ISCA 2016). `hybrid` selects the smaller of the FPC and BDI
-estimates per block. The estimators report the number of bytes the published
-format would need for each cache line; they are not bitstream encoders and do
-not include cache-line metadata or RTL synthesis numbers.
+`compare` runs cache-line baselines against a trained Byte-Select model. Zstd
+uses a real level-1 libzstd frame per cache line and LZ4 uses a real liblz4
+block; both sizes come from payloads covered by round-trip tests.
+using the model's same target sizes. It covers the FPC word-prefix format, the
+BDI Table-2 single-base modes, the original C-Pack dictionary scheme (Chen et
+al., TVLSI 18(8), 2010), Bit-Plane Compression (Kim et al., ISCA 2016), plus
+software-style `zstd`, `lz4`, `lz77-lite`, and `huffman`. FPC, BDI, C-Pack,
+BPC, LZ77-lite, and Huffman generate real round-trippable streams; their sizes
+come from the actual encoded byte vectors. `hybrid` selects the smaller
+FPC/BDI result per block. External raw/compressed selection metadata is not
+charged; BDI's internal mode byte is included in its encoded stream.
 
 ```powershell
 .\build\bsel.exe compare bsel256.model test.trace `
-  --baseline fpc --baseline bdi --baseline cpack --baseline bpc
+  --baseline fpc --baseline zstd --baseline lz4 `
+  --baseline lz77-lite --baseline huffman
 ```
 
 For a collection of workloads, use `compare-list`. It prints each trace's
@@ -160,7 +164,8 @@ the total traffic or storage result:
 
 ```text
 bsel compare-list bsel256.model cpu-a.trace cpu-b.trace gpu.trace \
-  --baseline fpc --baseline bdi --baseline hybrid --baseline cpack --baseline bpc
+  --baseline fpc --baseline bdi --baseline hybrid --baseline cpack --baseline bpc \
+  --baseline zstd --baseline lz4 --baseline lz77-lite --baseline huffman
 ```
 
 `compare-groups` accepts the same `--group NAME INPUT [INPUT ...]` syntax and
@@ -168,7 +173,7 @@ baseline options. Its `*_mean_of_group_means` rows are the relevant summary
 when comparing separately averaged benchmark sets; its `*_group_block_weighted`
 rows instead weight every full cache line equally.
 
-The FPC estimator uses the 3-bit-per-word header and zero-payload zero prefix,
+The FPC encoder uses packed 3-bit-per-word tags and a zero-payload zero prefix,
 so an all-zero 64-byte line occupies 6B as stated in this paper. The BDI
 estimator follows the Table-2 `Base8/4/2-Delta` sizes and tests whether one
 base has a feasible signed-delta range. The C-Pack estimator follows the
@@ -182,7 +187,12 @@ single-one, and 1-bit-flag fallback), with `ceil(log2(symbols))`-bit position
 fields that reproduce the published 5-bit fields on the paper's 32-symbol
 blocks. These definitions are intentionally documented because alternative
 FPC zero-run, multi-base BDI, and dictionary/replacement variants have
-different byte counts.
+different byte counts. LZ77-lite emits groups of eight real tokens with a flag
+byte and literal or 8-bit offset/length payloads. Huffman serializes its symbol/
+code-length table followed by a canonical Huffman bitstream. Tests decode all
+three formats and require byte-for-byte equality. The in-process `zstd`/`lz4`
+cache-line paths remain modeled; use the official CLI measurements for exact
+whole-stream bitstreams and ratios.
 
 ## Algorithm-Side Reproduction on Representative Traces
 
@@ -194,7 +204,7 @@ representative graph-workload data instead: `tools/run_gapbs_demo.sh` dumps the
 CSR arrays (vertex offsets + neighbor IDs) of GAP Benchmark Suite graphs as raw
 64-byte cache-line traces, trains the paper's three presets on 90% of each
 trace, and compares their quantized compression ratios against the five
-baseline estimators on the held-out middle 10% (the paper's holdout rule).
+baseline codecs on the held-out middle 10% (the paper's holdout rule).
 
 ```bash
 ./tools/run_gapbs_demo.sh /tmp/bsel-demo

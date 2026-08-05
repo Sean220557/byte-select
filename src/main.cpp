@@ -7,14 +7,12 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
-#include <system_error>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -139,12 +137,13 @@ std::vector<Block> split_blocks(const std::vector<std::uint8_t>& bytes,
 }
 
 std::size_t full_block_count(const std::string& path, std::size_t block_size) {
-    std::error_code error;
-    const auto bytes = std::filesystem::file_size(path, error);
-    if (error) {
-        throw std::runtime_error("cannot stat input: " + path + ": " + error.message());
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+    if (!input) {
+        throw std::runtime_error("cannot stat input: " + path);
     }
-    if (bytes > std::numeric_limits<std::size_t>::max()) {
+    const std::streamoff bytes = input.tellg();
+    if (bytes < 0 ||
+        static_cast<unsigned long long>(bytes) > std::numeric_limits<std::size_t>::max()) {
         throw std::runtime_error("input is too large for this host: " + path);
     }
     return static_cast<std::size_t>(bytes) / block_size;
@@ -914,7 +913,8 @@ void command_analyze_list(int argc, char** argv) {
 void command_compare(int argc, char** argv) {
     if (argc < 4) {
         throw std::runtime_error(
-            "usage: bsel compare MODEL INPUT [--baseline fpc|bdi|hybrid|cpack|bpc ...]");
+            "usage: bsel compare MODEL INPUT "
+            "[--baseline fpc|bdi|hybrid|cpack|bpc|zstd|lz4|lz77-lite|huffman ...]");
     }
     const auto baselines = parse_baseline_options(argc, argv, 4);
 
@@ -935,7 +935,7 @@ void command_compare_groups(int argc, char** argv) {
     if (argc < 6) {
         throw std::runtime_error(
             "usage: bsel compare-groups MODEL --group NAME INPUT [INPUT ...] [--group ...] "
-            "[--baseline fpc|bdi|hybrid|cpack|bpc ...]");
+            "[--baseline fpc|bdi|hybrid|cpack|bpc|zstd|lz4|lz77-lite|huffman ...]");
     }
     int first_option = 0;
     const auto groups = parse_trace_groups(argc, argv, 3, &first_option);
@@ -1002,7 +1002,7 @@ void command_compare_list(int argc, char** argv) {
     if (argc < 4) {
         throw std::runtime_error(
             "usage: bsel compare-list MODEL INPUT [INPUT ...] "
-            "[--baseline fpc|bdi|hybrid|cpack|bpc ...]");
+            "[--baseline fpc|bdi|hybrid|cpack|bpc|zstd|lz4|lz77-lite|huffman ...]");
     }
     std::vector<std::string> paths;
     int first_option = 3;
@@ -1283,10 +1283,10 @@ void print_usage() {
         << "  bsel analyze-list MODEL INPUT [INPUT ...] [--ideal-metadata-bytes N]\n"
         << "  bsel analyze-groups MODEL --group NAME INPUT [INPUT ...] [--group ...]\n"
         << "                      [--ideal-metadata-bytes N]\n"
-        << "  bsel compare MODEL INPUT [--baseline fpc|bdi|hybrid|cpack|bpc ...]\n"
-        << "  bsel compare-list MODEL INPUT [INPUT ...] [--baseline fpc|bdi|hybrid|cpack|bpc ...]\n"
+        << "  bsel compare MODEL INPUT [--baseline fpc|bdi|hybrid|cpack|bpc|zstd|lz4|lz77-lite|huffman ...]\n"
+        << "  bsel compare-list MODEL INPUT [INPUT ...] [--baseline fpc|bdi|hybrid|cpack|bpc|zstd|lz4|lz77-lite|huffman ...]\n"
         << "  bsel compare-groups MODEL --group NAME INPUT [INPUT ...] [--group ...]\n"
-        << "                      [--baseline fpc|bdi|hybrid|cpack|bpc ...]\n"
+        << "                      [--baseline fpc|bdi|hybrid|cpack|bpc|zstd|lz4|lz77-lite|huffman ...]\n"
         << "  bsel compress MODEL INPUT OUTPUT\n"
         << "  bsel decompress MODEL INPUT OUTPUT\n"
         << "  bsel patterns MODEL [--limit N]\n"

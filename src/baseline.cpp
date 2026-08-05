@@ -2,8 +2,14 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <limits>
+#include <queue>
 #include <stdexcept>
+#include <utility>
+
+#include <lz4.h>
+#include <zstd.h>
 
 namespace bsel {
 namespace {
@@ -41,34 +47,6 @@ bool is_sign_extended(std::uint32_t value, unsigned payload_bits) {
 bool halfword_is_sign_extended_byte(std::uint16_t value) {
     const auto signed_value = static_cast<std::int16_t>(value);
     return signed_value >= -128 && signed_value <= 127;
-}
-
-unsigned fpc_payload_bits(std::uint32_t value) {
-    if (value == 0) {
-        return 0;
-    }
-    if (is_sign_extended(value, 4)) {
-        return 4;
-    }
-    const std::uint8_t byte0 = static_cast<std::uint8_t>(value);
-    if (((value >> 8U) & 0xffU) == byte0 && ((value >> 16U) & 0xffU) == byte0 &&
-        ((value >> 24U) & 0xffU) == byte0) {
-        return 8;
-    }
-    if (is_sign_extended(value, 8)) {
-        return 8;
-    }
-    if (is_sign_extended(value, 16)) {
-        return 16;
-    }
-    if ((value & 0xffffU) == 0) {
-        return 16;
-    }
-    if (halfword_is_sign_extended_byte(static_cast<std::uint16_t>(value)) &&
-        halfword_is_sign_extended_byte(static_cast<std::uint16_t>(value >> 16U))) {
-        return 16;
-    }
-    return 32;
 }
 
 bool all_equal(const std::vector<std::uint64_t>& values) {
@@ -134,6 +112,158 @@ unsigned popcount(std::uint32_t value) {
     return count;
 }
 
+struct LzMatch {
+    std::size_t offset = 0;
+    std::size_t length = 0;
+};
+
+class BitWriter {
+public:
+    void put(std::uint64_t value, unsigned count) {
+        for (unsigned i = 0; i < count; ++i) {
+            if ((bits_ & 7U) == 0) {
+                bytes_.push_back(0);
+            }
+            if (((value >> i) & 1U) != 0) {
+                bytes_.back() |= static_cast<std::uint8_t>(1U << (bits_ & 7U));
+            }
+            ++bits_;
+        }
+    }
+
+    const std::vector<std::uint8_t>& bytes() const { return bytes_; }
+
+private:
+    std::vector<std::uint8_t> bytes_;
+    std::size_t bits_ = 0;
+};
+
+class BitReader {
+public:
+    explicit BitReader(const std::vector<std::uint8_t>& bytes) : bytes_(bytes) {}
+
+    std::uint64_t get(unsigned count) {
+        if (bit_ + count > bytes_.size() * 8U) {
+            throw std::runtime_error("truncated baseline bitstream");
+        }
+        std::uint64_t value = 0;
+        for (unsigned i = 0; i < count; ++i, ++bit_) {
+            value |= static_cast<std::uint64_t>(
+                         (bytes_[bit_ / 8U] >> (bit_ & 7U)) & 1U)
+                     << i;
+        }
+        return value;
+    }
+
+private:
+    const std::vector<std::uint8_t>& bytes_;
+    std::size_t bit_ = 0;
+};
+
+std::int32_t sign_extend(std::uint32_t value, unsigned bits) {
+    const auto sign = std::uint32_t{1} << (bits - 1U);
+    return static_cast<std::int32_t>((value ^ sign) - sign);
+}
+
+struct HuffmanNode {
+    std::uint64_t frequency = 0;
+    int symbol = -1;
+    int left = -1;
+    int right = -1;
+};
+
+std::array<std::uint8_t, 256> huffman_code_lengths(const Block& block) {
+    std::array<std::uint64_t, 256> frequencies{};
+    for (const auto byte : block) {
+        ++frequencies[byte];
+    }
+    std::vector<HuffmanNode> nodes;
+    using Entry = std::pair<std::uint64_t, int>;
+    std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> heap;
+    for (int symbol = 0; symbol < 256; ++symbol) {
+        if (frequencies[static_cast<std::size_t>(symbol)] != 0) {
+            nodes.push_back({frequencies[static_cast<std::size_t>(symbol)], symbol, -1, -1});
+            heap.push({nodes.back().frequency, static_cast<int>(nodes.size() - 1)});
+        }
+    }
+    std::array<std::uint8_t, 256> lengths{};
+    if (heap.size() == 1) {
+        lengths[static_cast<std::size_t>(nodes[heap.top().second].symbol)] = 1;
+        return lengths;
+    }
+    while (heap.size() > 1) {
+        const auto left = heap.top();
+        heap.pop();
+        const auto right = heap.top();
+        heap.pop();
+        nodes.push_back({left.first + right.first, -1, left.second, right.second});
+        heap.push({nodes.back().frequency, static_cast<int>(nodes.size() - 1)});
+    }
+    std::function<void(int, unsigned)> visit = [&](int index, unsigned depth) {
+        const auto& node = nodes[static_cast<std::size_t>(index)];
+        if (node.symbol >= 0) {
+            lengths[static_cast<std::size_t>(node.symbol)] =
+                static_cast<std::uint8_t>(depth);
+            return;
+        }
+        visit(node.left, depth + 1);
+        visit(node.right, depth + 1);
+    };
+    if (!heap.empty()) {
+        visit(heap.top().second, 0);
+    }
+    return lengths;
+}
+
+struct HuffmanCode {
+    std::uint32_t bits = 0;
+    std::uint8_t length = 0;
+};
+
+std::array<HuffmanCode, 256> canonical_huffman_codes(
+    const std::array<std::uint8_t, 256>& lengths) {
+    std::vector<std::pair<unsigned, unsigned>> ordered;
+    for (unsigned symbol = 0; symbol < 256; ++symbol) {
+        if (lengths[symbol] != 0) {
+            ordered.push_back({lengths[symbol], symbol});
+        }
+    }
+    std::sort(ordered.begin(), ordered.end());
+    std::array<HuffmanCode, 256> result{};
+    std::uint32_t code = 0;
+    unsigned previous_length = 0;
+    for (const auto [length, symbol] : ordered) {
+        code <<= length - previous_length;
+        // BitWriter is LSB-first, so reverse the canonical MSB-first code.
+        std::uint32_t reversed = 0;
+        for (unsigned i = 0; i < length; ++i) {
+            reversed |= ((code >> (length - 1U - i)) & 1U) << i;
+        }
+        result[symbol] = {reversed, static_cast<std::uint8_t>(length)};
+        ++code;
+        previous_length = length;
+    }
+    return result;
+}
+
+LzMatch find_lz_match(const Block& block, std::size_t position, std::size_t window,
+                      std::size_t max_length) {
+    LzMatch best;
+    const auto begin = position > window ? position - window : 0;
+    for (std::size_t candidate = begin; candidate < position; ++candidate) {
+        std::size_t length = 0;
+        while (length < max_length && position + length < block.size() &&
+               block[candidate + length] == block[position + length]) {
+            ++length;
+        }
+        if (length > best.length) {
+            best.length = length;
+            best.offset = position - candidate;
+        }
+    }
+    return best;
+}
+
 }  // namespace
 
 double BaselineEvaluation::unquantized_compression_ratio() const {
@@ -164,7 +294,20 @@ BaselineKind parse_baseline_kind(const std::string& text) {
     if (text == "bpc") {
         return BaselineKind::Bpc;
     }
-    throw std::invalid_argument("baseline must be fpc, bdi, hybrid, cpack, or bpc");
+    if (text == "zstd") {
+        return BaselineKind::Zstd;
+    }
+    if (text == "lz4") {
+        return BaselineKind::Lz4;
+    }
+    if (text == "lz77-lite") {
+        return BaselineKind::Lz77Lite;
+    }
+    if (text == "huffman") {
+        return BaselineKind::Huffman;
+    }
+    throw std::invalid_argument(
+        "baseline must be fpc, bdi, hybrid, cpack, bpc, zstd, lz4, lz77-lite, or huffman");
 }
 
 const char* baseline_kind_name(BaselineKind kind) {
@@ -179,55 +322,192 @@ const char* baseline_kind_name(BaselineKind kind) {
             return "cpack";
         case BaselineKind::Bpc:
             return "bpc";
+        case BaselineKind::Zstd:
+            return "zstd";
+        case BaselineKind::Lz4:
+            return "lz4";
+        case BaselineKind::Lz77Lite:
+            return "lz77-lite";
+        case BaselineKind::Huffman:
+            return "huffman";
     }
     throw std::invalid_argument("unknown baseline kind");
 }
 
-std::size_t fpc_encoded_size(const Block& block) {
+std::vector<std::uint8_t> fpc_encode(const Block& block) {
     if (block.empty() || block.size() % 4 != 0) {
         throw std::invalid_argument("FPC requires a non-empty block divisible by four bytes");
     }
-    const auto word_count = block.size() / 4;
-    std::size_t bits = word_count * 3;
+    BitWriter writer;
     for (std::size_t offset = 0; offset < block.size(); offset += 4) {
-        bits += fpc_payload_bits(static_cast<std::uint32_t>(
-            load_little_endian(block, offset, 4)));
+        const auto value = static_cast<std::uint32_t>(load_little_endian(block, offset, 4));
+        if (value == 0) {
+            writer.put(0, 3);
+        } else if (is_sign_extended(value, 4)) {
+            writer.put(1, 3);
+            writer.put(value & 0xfU, 4);
+        } else {
+            const auto byte = static_cast<std::uint8_t>(value);
+            if (((value >> 8U) & 0xffU) == byte &&
+                ((value >> 16U) & 0xffU) == byte &&
+                ((value >> 24U) & 0xffU) == byte) {
+                writer.put(2, 3);
+                writer.put(byte, 8);
+            } else if (is_sign_extended(value, 8)) {
+                writer.put(3, 3);
+                writer.put(value & 0xffU, 8);
+            } else if (is_sign_extended(value, 16)) {
+                writer.put(4, 3);
+                writer.put(value & 0xffffU, 16);
+            } else if ((value & 0xffffU) == 0) {
+                writer.put(5, 3);
+                writer.put(value >> 16U, 16);
+            } else if (halfword_is_sign_extended_byte(static_cast<std::uint16_t>(value)) &&
+                       halfword_is_sign_extended_byte(
+                           static_cast<std::uint16_t>(value >> 16U))) {
+                writer.put(6, 3);
+                writer.put(value & 0xffU, 8);
+                writer.put((value >> 16U) & 0xffU, 8);
+            } else {
+                writer.put(7, 3);
+                writer.put(value, 32);
+            }
+        }
     }
-    const auto bytes = (bits + 7U) / 8U;
-    return std::min(bytes, block.size());
+    return writer.bytes();
 }
 
-std::size_t bdi_encoded_size(const Block& block) {
+Block fpc_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size) {
+    if (output_size == 0 || output_size % 4 != 0) {
+        throw std::invalid_argument("FPC output size must be divisible by four bytes");
+    }
+    BitReader reader(encoded);
+    Block output;
+    output.reserve(output_size);
+    while (output.size() < output_size) {
+        const auto tag = reader.get(3);
+        std::uint32_t value = 0;
+        switch (tag) {
+            case 0: break;
+            case 1: value = static_cast<std::uint32_t>(sign_extend(reader.get(4), 4)); break;
+            case 2: {
+                const auto byte = static_cast<std::uint32_t>(reader.get(8));
+                value = byte * 0x01010101U;
+                break;
+            }
+            case 3: value = static_cast<std::uint32_t>(sign_extend(reader.get(8), 8)); break;
+            case 4: value = static_cast<std::uint32_t>(sign_extend(reader.get(16), 16)); break;
+            case 5: value = static_cast<std::uint32_t>(reader.get(16)) << 16U; break;
+            case 6: {
+                const auto low = static_cast<std::uint32_t>(sign_extend(reader.get(8), 8));
+                const auto high = static_cast<std::uint32_t>(sign_extend(reader.get(8), 8));
+                value = (low & 0xffffU) | (high << 16U);
+                break;
+            }
+            case 7: value = static_cast<std::uint32_t>(reader.get(32)); break;
+            default: throw std::runtime_error("invalid FPC tag");
+        }
+        for (unsigned byte = 0; byte < 4; ++byte) {
+            output.push_back(static_cast<std::uint8_t>(value >> (8U * byte)));
+        }
+    }
+    return output;
+}
+
+std::size_t fpc_encoded_size(const Block& block) {
+    return std::min(fpc_encode(block).size(), block.size());
+}
+
+std::vector<std::uint8_t> bdi_encode(const Block& block) {
     if (block.empty() || block.size() % 8 != 0) {
         throw std::invalid_argument("BDI requires a non-empty block divisible by eight bytes");
     }
-    std::size_t best = block.size();
+    std::vector<std::uint8_t> best;
+    best.reserve(block.size() + 1);
+    best.push_back(0);  // raw
+    best.insert(best.end(), block.begin(), block.end());
     const auto values8 = values_for_width(block, 8);
     if (std::all_of(values8.begin(), values8.end(),
                     [](std::uint64_t value) { return value == 0; })) {
-        best = 1;
+        best = {1};
     }
     if (all_equal(values8)) {
-        best = std::min(best, std::size_t{8});
+        std::vector<std::uint8_t> repeated{2};
+        repeated.insert(repeated.end(), block.begin(), block.begin() + 8);
+        if (repeated.size() < best.size()) best = std::move(repeated);
     }
 
     const std::array<std::array<std::size_t, 3>, 6> modes{{
         {{8, 1, 8}}, {{8, 2, 8}}, {{8, 4, 8}},
         {{4, 1, 4}}, {{4, 2, 4}}, {{2, 1, 2}},
     }};
-    for (const auto& mode : modes) {
+    for (std::size_t mode_index = 0; mode_index < modes.size(); ++mode_index) {
+        const auto& mode = modes[mode_index];
         const auto value_bytes = mode[0];
         const auto delta_bytes = mode[1];
         const auto base_bytes = mode[2];
         const auto values = values_for_width(block, value_bytes);
         if (delta_range_fits(values, delta_bytes)) {
-            best = std::min(best, base_bytes + values.size() * delta_bytes);
+            const auto base = *std::min_element(values.begin(), values.end());
+            std::vector<std::uint8_t> candidate{
+                static_cast<std::uint8_t>(3 + mode_index)};
+            for (std::size_t i = 0; i < base_bytes; ++i)
+                candidate.push_back(static_cast<std::uint8_t>(base >> (8U * i)));
+            for (const auto value : values) {
+                const auto delta = value - base;
+                for (std::size_t i = 0; i < delta_bytes; ++i)
+                    candidate.push_back(static_cast<std::uint8_t>(delta >> (8U * i)));
+            }
+            if (candidate.size() < best.size()) best = std::move(candidate);
         }
     }
     return best;
 }
 
-std::size_t cpack_encoded_size(const Block& block) {
+Block bdi_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size) {
+    if (encoded.empty() || output_size == 0 || output_size % 8 != 0)
+        throw std::invalid_argument("invalid BDI stream or output size");
+    if (encoded[0] == 0) {
+        if (encoded.size() != output_size + 1) throw std::runtime_error("invalid raw BDI stream");
+        return Block(encoded.begin() + 1, encoded.end());
+    }
+    if (encoded[0] == 1) return Block(output_size, 0);
+    if (encoded[0] == 2) {
+        if (encoded.size() != 9) throw std::runtime_error("invalid repeated BDI stream");
+        Block out;
+        while (out.size() < output_size) out.insert(out.end(), encoded.begin() + 1, encoded.end());
+        return out;
+    }
+    const std::array<std::array<std::size_t, 3>, 6> modes{{
+        {{8, 1, 8}}, {{8, 2, 8}}, {{8, 4, 8}},
+        {{4, 1, 4}}, {{4, 2, 4}}, {{2, 1, 2}},
+    }};
+    const auto index = static_cast<std::size_t>(encoded[0] - 3);
+    if (index >= modes.size()) throw std::runtime_error("invalid BDI mode");
+    const auto value_bytes = modes[index][0], delta_bytes = modes[index][1],
+               base_bytes = modes[index][2];
+    if (output_size % value_bytes != 0 ||
+        encoded.size() != 1 + base_bytes + output_size / value_bytes * delta_bytes)
+        throw std::runtime_error("invalid BDI payload size");
+    std::uint64_t base = 0;
+    for (std::size_t i = 0; i < base_bytes; ++i) base |= std::uint64_t(encoded[1 + i]) << (8U * i);
+    Block out;
+    out.reserve(output_size);
+    std::size_t at = 1 + base_bytes;
+    for (std::size_t word = 0; word < output_size / value_bytes; ++word) {
+        std::uint64_t delta = 0;
+        for (std::size_t i = 0; i < delta_bytes; ++i) delta |= std::uint64_t(encoded[at++]) << (8U * i);
+        const auto value = base + delta;
+        for (std::size_t i = 0; i < value_bytes; ++i) out.push_back(static_cast<std::uint8_t>(value >> (8U * i)));
+    }
+    return out;
+}
+
+std::size_t bdi_encoded_size(const Block& block) {
+    return std::min(bdi_encode(block).size(), block.size());
+}
+
+std::vector<std::uint8_t> cpack_encode(const Block& block) {
     // C-Pack (Chen et al., TVLSI 18(8), 2010) treats a cache line as 4-byte
     // words and encodes each word with one of six patterns (z = zero byte,
     // m = byte matched against the dictionary, x = unmatched byte):
@@ -249,7 +529,7 @@ std::size_t cpack_encoded_size(const Block& block) {
     constexpr std::size_t kIndexBits = 4;
     std::vector<std::uint32_t> dictionary;
     dictionary.reserve(kDictionaryEntries);
-    std::size_t bits = 0;
+    BitWriter writer;
     for (std::size_t offset = 0; offset < block.size(); offset += 4) {
         const auto word = static_cast<std::uint32_t>(
             load_little_endian(block, offset, 4));
@@ -259,11 +539,12 @@ std::size_t cpack_encoded_size(const Block& block) {
         const auto byte3 = static_cast<std::uint8_t>((word >> 24U) & 0xffU);
 
         if (word == 0) {
-            bits += 2;
+            writer.put(0, 2);
             continue;
         }
         if (byte1 == 0 && byte2 == 0 && byte3 == 0) {
-            bits += 4 + 8;
+            writer.put(11, 4);  // 1101 in stream order
+            writer.put(byte0, 8);
             continue;
         }
 
@@ -271,7 +552,9 @@ std::size_t cpack_encoded_size(const Block& block) {
         // significant byte: 4 matches -> mmmm, 3 -> mmmx, 2 -> mmxx, fewer
         // than 2 -> xxxx.
         int best_matches = 1;
-        for (const auto entry : dictionary) {
+        std::size_t best_index = 0;
+        for (std::size_t dictionary_index = 0; dictionary_index < dictionary.size(); ++dictionary_index) {
+            const auto entry = dictionary[dictionary_index];
             const auto e0 = static_cast<std::uint8_t>(entry & 0xffU);
             const auto e1 = static_cast<std::uint8_t>((entry >> 8U) & 0xffU);
             const auto e2 = static_cast<std::uint8_t>((entry >> 16U) & 0xffU);
@@ -286,16 +569,25 @@ std::size_t cpack_encoded_size(const Block& block) {
                     }
                 }
             }
-            best_matches = std::max(best_matches, matches);
+            if (matches > best_matches) {
+                best_matches = matches;
+                best_index = dictionary_index;
+            }
         }
         if (best_matches == 4) {
-            bits += 2 + kIndexBits;
+            writer.put(1, 2);  // 10
+            writer.put(best_index, kIndexBits);
         } else if (best_matches == 3) {
-            bits += 4 + kIndexBits + 8;
+            writer.put(7, 4);  // 1110
+            writer.put(best_index, kIndexBits);
+            writer.put(byte0, 8);
         } else if (best_matches == 2) {
-            bits += 4 + kIndexBits + 16;
+            writer.put(3, 4);  // 1100
+            writer.put(best_index, kIndexBits);
+            writer.put(word & 0xffffU, 16);
         } else {
-            bits += 2 + 32;
+            writer.put(2, 2);  // 01
+            writer.put(word, 32);
         }
 
         if (dictionary.size() < kDictionaryEntries) {
@@ -305,10 +597,58 @@ std::size_t cpack_encoded_size(const Block& block) {
             dictionary.push_back(word);
         }
     }
-    return std::min(rounded_up_bytes(bits), block.size());
+    return writer.bytes();
 }
 
-std::size_t bpc_encoded_size(const Block& block) {
+Block cpack_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size) {
+    if (output_size == 0 || output_size % 4 != 0) throw std::invalid_argument("invalid C-Pack output size");
+    constexpr std::size_t kDictionaryEntries = 16;
+    BitReader reader(encoded);
+    std::vector<std::uint32_t> dictionary;
+    Block out;
+    out.reserve(output_size);
+    while (out.size() < output_size) {
+        const auto first = reader.get(2);
+        std::uint32_t word = 0;
+        bool update = false;
+        if (first == 0) {
+            word = 0;
+        } else if (first == 2) {
+            word = static_cast<std::uint32_t>(reader.get(32));
+            update = true;
+        } else if (first == 1) {
+            const auto index = static_cast<std::size_t>(reader.get(4));
+            if (index >= dictionary.size()) throw std::runtime_error("invalid C-Pack index");
+            word = dictionary[index];
+            update = true;
+        } else {
+            const auto subtype = reader.get(2);
+            if (subtype == 2) {
+                word = static_cast<std::uint32_t>(reader.get(8));
+            } else {
+                const auto index = static_cast<std::size_t>(reader.get(4));
+                if (index >= dictionary.size()) throw std::runtime_error("invalid C-Pack index");
+                word = dictionary[index];
+                if (subtype == 0) word = (word & 0xffff0000U) | reader.get(16);
+                else if (subtype == 1) word = (word & 0xffffff00U) | reader.get(8);
+                else throw std::runtime_error("invalid C-Pack subtype");
+                update = true;
+            }
+        }
+        for (unsigned i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>(word >> (8U * i)));
+        if (update) {
+            if (dictionary.size() == kDictionaryEntries) dictionary.erase(dictionary.begin());
+            dictionary.push_back(word);
+        }
+    }
+    return out;
+}
+
+std::size_t cpack_encoded_size(const Block& block) {
+    return std::min(cpack_encode(block).size(), block.size());
+}
+
+std::size_t bpc_encoded_size_legacy(const Block& block) {
     // Bit-Plane Compression (Kim et al., ISCA 2016) transforms a block of
     // 32-bit symbols into a base symbol plus neighboring deltas, rotates the
     // deltas into 32 bit-planes, XORs adjacent planes (DBX), and encodes the
@@ -438,6 +778,348 @@ std::size_t bpc_encoded_size(const Block& block) {
     return std::min(rounded_up_bytes(bits), block.size());
 }
 
+std::vector<std::uint8_t> bpc_encode(const Block& block) {
+    if (block.size() < 8 || block.size() % 4 != 0 || block.size() / 4 > 32)
+        throw std::invalid_argument("BPC requires 2..32 32-bit symbols");
+    const auto symbols64 = values_for_width(block, 4);
+    const auto symbol_count = symbols64.size();
+    const auto width = symbol_count - 1;
+    const auto mask = (std::uint32_t{1} << width) - 1U;
+    const auto position_width = ceil_log2(symbol_count);
+    BitWriter writer;
+    const auto base_u = static_cast<std::uint32_t>(symbols64.front());
+    const auto base = static_cast<std::int32_t>(base_u);
+    if (base == 0) writer.put(0, 3);
+    else if (fits_signed(base, 4)) { writer.put(4, 3); writer.put(base_u & 0xfU, 4); }
+    else if (fits_signed(base, 8)) { writer.put(2, 3); writer.put(base_u & 0xffU, 8); }
+    else if (fits_signed(base, 16)) { writer.put(6, 3); writer.put(base_u & 0xffffU, 16); }
+    else { writer.put(1, 1); writer.put(base_u, 32); }
+
+    std::vector<std::uint32_t> deltas(width);
+    for (std::size_t i = 1; i < symbol_count; ++i)
+        deltas[i - 1] = static_cast<std::uint32_t>(symbols64[i]) -
+                        static_cast<std::uint32_t>(symbols64[i - 1]);
+    std::array<std::uint32_t, 32> planes{};
+    for (unsigned bit = 0; bit < 32; ++bit)
+        for (std::size_t i = 0; i < width; ++i)
+            planes[bit] |= ((deltas[i] >> bit) & 1U) << i;
+
+    std::vector<std::uint32_t> dbx;
+    dbx.push_back(planes[31]);
+    for (unsigned bit = 31; bit-- > 0;) dbx.push_back(planes[bit] ^ planes[bit + 1]);
+    for (std::size_t i = 0; i < dbx.size();) {
+        if (dbx[i] == 0) {
+            std::size_t run = 1;
+            while (i + run < dbx.size() && dbx[i + run] == 0 && run < 33) ++run;
+            if (run == 1) writer.put(4, 3);           // 001
+            else { writer.put(2, 2); writer.put(run - 2, 5); } // 01 + length
+            i += run;
+            continue;
+        }
+        const auto ones = popcount(dbx[i]);
+        const auto first = count_trailing_zeros(dbx[i]);
+        if (dbx[i] == mask) writer.put(0, 5);          // 00000
+        else if (ones == 2 && first + 1 < width && ((dbx[i] >> (first + 1)) & 1U)) {
+            writer.put(8, 5); writer.put(first, position_width); // 00010
+        } else if (ones == 1) {
+            writer.put(24, 5); writer.put(first, position_width); // 00011
+        } else {
+            writer.put(1, 1); writer.put(dbx[i], width);
+        }
+        ++i;
+    }
+    return writer.bytes();
+}
+
+Block bpc_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size) {
+    if (output_size < 8 || output_size % 4 != 0 || output_size / 4 > 32)
+        throw std::invalid_argument("invalid BPC output size");
+    const auto symbol_count = output_size / 4;
+    const auto width = symbol_count - 1;
+    const auto mask = (std::uint32_t{1} << width) - 1U;
+    const auto position_width = ceil_log2(symbol_count);
+    BitReader reader(encoded);
+    std::uint32_t base = 0;
+    if (reader.get(1) != 0) base = static_cast<std::uint32_t>(reader.get(32));
+    else {
+        const auto suffix = reader.get(2);
+        if (suffix == 0) base = 0;
+        else if (suffix == 2) base = static_cast<std::uint32_t>(sign_extend(reader.get(4), 4));
+        else if (suffix == 1) base = static_cast<std::uint32_t>(sign_extend(reader.get(8), 8));
+        else base = static_cast<std::uint32_t>(sign_extend(reader.get(16), 16));
+    }
+    std::vector<std::uint32_t> dbx;
+    while (dbx.size() < 32) {
+        if (reader.get(1) != 0) {
+            dbx.push_back(static_cast<std::uint32_t>(reader.get(width)));
+            continue;
+        }
+        if (reader.get(1) != 0) {
+            const auto run = static_cast<std::size_t>(reader.get(5)) + 2;
+            if (dbx.size() + run > 32) throw std::runtime_error("invalid BPC zero run");
+            dbx.insert(dbx.end(), run, 0);
+            continue;
+        }
+        if (reader.get(1) != 0) { dbx.push_back(0); continue; }
+        const auto subtype = reader.get(2);
+        if (subtype == 0) dbx.push_back(mask);
+        else {
+            const auto position = static_cast<unsigned>(reader.get(position_width));
+            if (position >= width) throw std::runtime_error("invalid BPC position");
+            if (subtype == 1) dbx.push_back(3U << position);
+            else if (subtype == 3) dbx.push_back(1U << position);
+            else throw std::runtime_error("unsupported BPC plane code");
+        }
+    }
+    std::array<std::uint32_t, 32> planes{};
+    planes[31] = dbx[0];
+    for (std::size_t i = 1; i < 32; ++i) {
+        const auto bit = 31U - static_cast<unsigned>(i);
+        planes[bit] = dbx[i] ^ planes[bit + 1U];
+    }
+    std::vector<std::uint32_t> deltas(width, 0);
+    for (unsigned bit = 0; bit < 32; ++bit)
+        for (std::size_t i = 0; i < width; ++i)
+            deltas[i] |= ((planes[bit] >> i) & 1U) << bit;
+    Block out;
+    out.reserve(output_size);
+    auto append = [&](std::uint32_t value) {
+        for (unsigned i = 0; i < 4; ++i) out.push_back(static_cast<std::uint8_t>(value >> (8U * i)));
+    };
+    append(base);
+    auto value = base;
+    for (const auto delta : deltas) { value += delta; append(value); }
+    return out;
+}
+
+std::size_t bpc_encoded_size(const Block& block) {
+    return std::min(bpc_encode(block).size(), block.size());
+}
+
+std::vector<std::uint8_t> lz77_lite_encode(const Block& block) {
+    if (block.empty()) {
+        throw std::invalid_argument("LZ77-lite requires a non-empty block");
+    }
+    constexpr std::size_t kWindow = 255;
+    constexpr std::size_t kMaxLength = 255;
+    constexpr std::size_t kMinMatch = 3;
+    std::vector<std::uint8_t> output;
+    std::size_t position = 0;
+    while (position < block.size()) {
+        const auto flags_at = output.size();
+        output.push_back(0);
+        for (unsigned token = 0; token < 8 && position < block.size(); ++token) {
+            const auto match = find_lz_match(block, position, kWindow, kMaxLength);
+            if (match.length >= kMinMatch) {
+                output[flags_at] |= static_cast<std::uint8_t>(1U << token);
+                output.push_back(static_cast<std::uint8_t>(match.offset));
+                output.push_back(static_cast<std::uint8_t>(match.length));
+                position += match.length;
+            } else {
+                output.push_back(block[position++]);
+            }
+        }
+    }
+    return output;
+}
+
+Block lz77_lite_decode(const std::vector<std::uint8_t>& encoded,
+                       std::size_t output_size) {
+    constexpr std::size_t kMinMatch = 3;
+    Block output;
+    output.reserve(output_size);
+    std::size_t input = 0;
+    while (output.size() < output_size) {
+        if (input >= encoded.size()) {
+            throw std::runtime_error("truncated LZ77-lite flags");
+        }
+        const auto flags = encoded[input++];
+        for (unsigned token = 0; token < 8 && output.size() < output_size; ++token) {
+            if ((flags & (1U << token)) == 0) {
+                if (input >= encoded.size()) {
+                    throw std::runtime_error("truncated LZ77-lite literal");
+                }
+                output.push_back(encoded[input++]);
+            } else {
+                if (input + 1 >= encoded.size()) {
+                    throw std::runtime_error("truncated LZ77-lite match");
+                }
+                const auto offset = encoded[input++];
+                const auto length = encoded[input++];
+                if (offset == 0 || offset > output.size() || length < kMinMatch ||
+                    output.size() + length > output_size) {
+                    throw std::runtime_error("invalid LZ77-lite match");
+                }
+                for (unsigned i = 0; i < length; ++i) {
+                    output.push_back(output[output.size() - offset]);
+                }
+            }
+        }
+    }
+    return output;
+}
+
+std::size_t lz77_lite_encoded_size(const Block& block) {
+    return std::min(lz77_lite_encode(block).size(), block.size());
+}
+
+std::vector<std::uint8_t> lz4_encode(const Block& block) {
+    if (block.empty()) {
+        throw std::invalid_argument("LZ4 requires a non-empty block");
+    }
+    if (block.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("LZ4 block is too large");
+    }
+    const auto input_size = static_cast<int>(block.size());
+    std::vector<std::uint8_t> output(
+        static_cast<std::size_t>(LZ4_compressBound(input_size)));
+    const auto written = LZ4_compress_default(
+        reinterpret_cast<const char*>(block.data()),
+        reinterpret_cast<char*>(output.data()), input_size,
+        static_cast<int>(output.size()));
+    if (written <= 0) {
+        throw std::runtime_error("LZ4 compression failed");
+    }
+    output.resize(static_cast<std::size_t>(written));
+    return output;
+}
+
+Block lz4_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size) {
+    if (encoded.empty() || output_size == 0 ||
+        encoded.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        output_size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        throw std::invalid_argument("invalid LZ4 stream or output size");
+    }
+    Block output(output_size);
+    const auto decoded = LZ4_decompress_safe(
+        reinterpret_cast<const char*>(encoded.data()),
+        reinterpret_cast<char*>(output.data()), static_cast<int>(encoded.size()),
+        static_cast<int>(output_size));
+    if (decoded != static_cast<int>(output_size)) {
+        throw std::runtime_error("LZ4 decompression failed");
+    }
+    return output;
+}
+
+std::size_t lz4_encoded_size(const Block& block) {
+    return std::min(lz4_encode(block).size(), block.size());
+}
+
+std::vector<std::uint8_t> huffman_encode(const Block& block) {
+    if (block.empty()) {
+        throw std::invalid_argument("Huffman requires a non-empty block");
+    }
+    const auto lengths = huffman_code_lengths(block);
+    const auto codes = canonical_huffman_codes(lengths);
+    std::vector<std::uint8_t> output;
+    const auto symbol_count = static_cast<std::uint16_t>(
+        std::count_if(lengths.begin(), lengths.end(), [](std::uint8_t x) { return x != 0; }));
+    output.push_back(static_cast<std::uint8_t>(symbol_count & 0xffU));
+    output.push_back(static_cast<std::uint8_t>(symbol_count >> 8U));
+    for (unsigned symbol = 0; symbol < 256; ++symbol) {
+        if (lengths[symbol] != 0) {
+            output.push_back(static_cast<std::uint8_t>(symbol));
+            output.push_back(lengths[symbol]);
+        }
+    }
+    BitWriter payload;
+    for (const auto symbol : block) {
+        payload.put(codes[symbol].bits, codes[symbol].length);
+    }
+    output.insert(output.end(), payload.bytes().begin(), payload.bytes().end());
+    return output;
+}
+
+Block huffman_decode(const std::vector<std::uint8_t>& encoded,
+                     std::size_t output_size) {
+    if (encoded.size() < 2) {
+        throw std::runtime_error("truncated Huffman header");
+    }
+    const auto count = static_cast<std::size_t>(encoded[0]) |
+                       (static_cast<std::size_t>(encoded[1]) << 8U);
+    if (count == 0 || count > 256 || encoded.size() < 2 + count * 2) {
+        throw std::runtime_error("invalid Huffman header");
+    }
+    std::array<std::uint8_t, 256> lengths{};
+    std::size_t at = 2;
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto symbol = encoded[at++];
+        const auto length = encoded[at++];
+        if (length == 0 || lengths[symbol] != 0) {
+            throw std::runtime_error("invalid Huffman code table");
+        }
+        lengths[symbol] = length;
+    }
+    const auto codes = canonical_huffman_codes(lengths);
+    struct DecodeEntry { std::uint32_t bits; unsigned length; std::uint8_t symbol; };
+    std::vector<DecodeEntry> table;
+    for (unsigned symbol = 0; symbol < 256; ++symbol) {
+        if (codes[symbol].length != 0) {
+            table.push_back({codes[symbol].bits, codes[symbol].length,
+                             static_cast<std::uint8_t>(symbol)});
+        }
+    }
+    const std::vector<std::uint8_t> payload(encoded.begin() + static_cast<std::ptrdiff_t>(at),
+                                            encoded.end());
+    BitReader reader(payload);
+    Block output;
+    output.reserve(output_size);
+    while (output.size() < output_size) {
+        std::uint32_t bits = 0;
+        bool found = false;
+        for (unsigned length = 1; length <= 32 && !found; ++length) {
+            bits |= static_cast<std::uint32_t>(reader.get(1)) << (length - 1U);
+            for (const auto& entry : table) {
+                if (entry.length == length && entry.bits == bits) {
+                    output.push_back(entry.symbol);
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            throw std::runtime_error("invalid Huffman payload");
+        }
+    }
+    return output;
+}
+
+std::size_t huffman_encoded_size(const Block& block) {
+    return std::min(huffman_encode(block).size(), block.size());
+}
+
+std::vector<std::uint8_t> zstd_encode(const Block& block) {
+    if (block.empty()) {
+        throw std::invalid_argument("Zstd requires a non-empty block");
+    }
+    std::vector<std::uint8_t> output(ZSTD_compressBound(block.size()));
+    const auto written = ZSTD_compress(output.data(), output.size(), block.data(),
+                                       block.size(), 1);
+    if (ZSTD_isError(written)) {
+        throw std::runtime_error(std::string("Zstd compression failed: ") +
+                                 ZSTD_getErrorName(written));
+    }
+    output.resize(written);
+    return output;
+}
+
+Block zstd_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size) {
+    if (encoded.empty() || output_size == 0) {
+        throw std::invalid_argument("invalid Zstd stream or output size");
+    }
+    Block output(output_size);
+    const auto decoded = ZSTD_decompress(output.data(), output.size(), encoded.data(),
+                                         encoded.size());
+    if (ZSTD_isError(decoded) || decoded != output_size) {
+        throw std::runtime_error("Zstd decompression failed");
+    }
+    return output;
+}
+
+std::size_t zstd_encoded_size(const Block& block) {
+    return std::min(zstd_encode(block).size(), block.size());
+}
+
 std::size_t baseline_encoded_size(const Block& block, BaselineKind kind) {
     switch (kind) {
         case BaselineKind::Fpc:
@@ -450,6 +1132,14 @@ std::size_t baseline_encoded_size(const Block& block, BaselineKind kind) {
             return cpack_encoded_size(block);
         case BaselineKind::Bpc:
             return bpc_encoded_size(block);
+        case BaselineKind::Zstd:
+            return zstd_encoded_size(block);
+        case BaselineKind::Lz4:
+            return lz4_encoded_size(block);
+        case BaselineKind::Lz77Lite:
+            return lz77_lite_encoded_size(block);
+        case BaselineKind::Huffman:
+            return huffman_encoded_size(block);
     }
     throw std::invalid_argument("unknown baseline kind");
 }
