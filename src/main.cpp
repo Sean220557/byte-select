@@ -914,7 +914,7 @@ void command_compare(int argc, char** argv) {
     if (argc < 4) {
         throw std::runtime_error(
             "usage: bsel compare MODEL INPUT "
-            "[--baseline fpc|bdi|hybrid|cpack|bpc|zstd|lz4|lz77-lite|huffman ...]");
+            "[--baseline fpc|bdi|hybrid|cpack|bpc|huffman ...]");
     }
     const auto baselines = parse_baseline_options(argc, argv, 4);
 
@@ -935,7 +935,7 @@ void command_compare_groups(int argc, char** argv) {
     if (argc < 6) {
         throw std::runtime_error(
             "usage: bsel compare-groups MODEL --group NAME INPUT [INPUT ...] [--group ...] "
-            "[--baseline fpc|bdi|hybrid|cpack|bpc|zstd|lz4|lz77-lite|huffman ...]");
+            "[--baseline fpc|bdi|hybrid|cpack|bpc|huffman ...]");
     }
     int first_option = 0;
     const auto groups = parse_trace_groups(argc, argv, 3, &first_option);
@@ -1002,7 +1002,7 @@ void command_compare_list(int argc, char** argv) {
     if (argc < 4) {
         throw std::runtime_error(
             "usage: bsel compare-list MODEL INPUT [INPUT ...] "
-            "[--baseline fpc|bdi|hybrid|cpack|bpc|zstd|lz4|lz77-lite|huffman ...]");
+            "[--baseline fpc|bdi|hybrid|cpack|bpc|huffman ...]");
     }
     std::vector<std::string> paths;
     int first_option = 3;
@@ -1283,10 +1283,10 @@ void print_usage() {
         << "  bsel analyze-list MODEL INPUT [INPUT ...] [--ideal-metadata-bytes N]\n"
         << "  bsel analyze-groups MODEL --group NAME INPUT [INPUT ...] [--group ...]\n"
         << "                      [--ideal-metadata-bytes N]\n"
-        << "  bsel compare MODEL INPUT [--baseline fpc|bdi|hybrid|cpack|bpc|zstd|lz4|lz77-lite|huffman ...]\n"
-        << "  bsel compare-list MODEL INPUT [INPUT ...] [--baseline fpc|bdi|hybrid|cpack|bpc|zstd|lz4|lz77-lite|huffman ...]\n"
+        << "  bsel compare MODEL INPUT [--baseline fpc|bdi|hybrid|cpack|bpc|huffman ...]\n"
+        << "  bsel compare-list MODEL INPUT [INPUT ...] [--baseline fpc|bdi|hybrid|cpack|bpc|huffman ...]\n"
         << "  bsel compare-groups MODEL --group NAME INPUT [INPUT ...] [--group ...]\n"
-        << "                      [--baseline fpc|bdi|hybrid|cpack|bpc|zstd|lz4|lz77-lite|huffman ...]\n"
+        << "                      [--baseline fpc|bdi|hybrid|cpack|bpc|huffman ...]\n"
         << "  bsel compress MODEL INPUT OUTPUT\n"
         << "  bsel decompress MODEL INPUT OUTPUT\n"
         << "  bsel patterns MODEL [--limit N]\n"

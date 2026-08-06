@@ -3,13 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <functional>
-#include <limits>
 #include <queue>
 #include <stdexcept>
 #include <utility>
-
-#include <lz4.h>
-#include <zstd.h>
 
 namespace bsel {
 namespace {
@@ -111,11 +107,6 @@ unsigned popcount(std::uint32_t value) {
     }
     return count;
 }
-
-struct LzMatch {
-    std::size_t offset = 0;
-    std::size_t length = 0;
-};
 
 class BitWriter {
 public:
@@ -246,24 +237,6 @@ std::array<HuffmanCode, 256> canonical_huffman_codes(
     return result;
 }
 
-LzMatch find_lz_match(const Block& block, std::size_t position, std::size_t window,
-                      std::size_t max_length) {
-    LzMatch best;
-    const auto begin = position > window ? position - window : 0;
-    for (std::size_t candidate = begin; candidate < position; ++candidate) {
-        std::size_t length = 0;
-        while (length < max_length && position + length < block.size() &&
-               block[candidate + length] == block[position + length]) {
-            ++length;
-        }
-        if (length > best.length) {
-            best.length = length;
-            best.offset = position - candidate;
-        }
-    }
-    return best;
-}
-
 }  // namespace
 
 double BaselineEvaluation::unquantized_compression_ratio() const {
@@ -294,20 +267,11 @@ BaselineKind parse_baseline_kind(const std::string& text) {
     if (text == "bpc") {
         return BaselineKind::Bpc;
     }
-    if (text == "zstd") {
-        return BaselineKind::Zstd;
-    }
-    if (text == "lz4") {
-        return BaselineKind::Lz4;
-    }
-    if (text == "lz77-lite") {
-        return BaselineKind::Lz77Lite;
-    }
     if (text == "huffman") {
         return BaselineKind::Huffman;
     }
     throw std::invalid_argument(
-        "baseline must be fpc, bdi, hybrid, cpack, bpc, zstd, lz4, lz77-lite, or huffman");
+        "baseline must be fpc, bdi, hybrid, cpack, bpc, or huffman");
 }
 
 const char* baseline_kind_name(BaselineKind kind) {
@@ -322,12 +286,6 @@ const char* baseline_kind_name(BaselineKind kind) {
             return "cpack";
         case BaselineKind::Bpc:
             return "bpc";
-        case BaselineKind::Zstd:
-            return "zstd";
-        case BaselineKind::Lz4:
-            return "lz4";
-        case BaselineKind::Lz77Lite:
-            return "lz77-lite";
         case BaselineKind::Huffman:
             return "huffman";
     }
@@ -896,115 +854,6 @@ std::size_t bpc_encoded_size(const Block& block) {
     return std::min(bpc_encode(block).size(), block.size());
 }
 
-std::vector<std::uint8_t> lz77_lite_encode(const Block& block) {
-    if (block.empty()) {
-        throw std::invalid_argument("LZ77-lite requires a non-empty block");
-    }
-    constexpr std::size_t kWindow = 255;
-    constexpr std::size_t kMaxLength = 255;
-    constexpr std::size_t kMinMatch = 3;
-    std::vector<std::uint8_t> output;
-    std::size_t position = 0;
-    while (position < block.size()) {
-        const auto flags_at = output.size();
-        output.push_back(0);
-        for (unsigned token = 0; token < 8 && position < block.size(); ++token) {
-            const auto match = find_lz_match(block, position, kWindow, kMaxLength);
-            if (match.length >= kMinMatch) {
-                output[flags_at] |= static_cast<std::uint8_t>(1U << token);
-                output.push_back(static_cast<std::uint8_t>(match.offset));
-                output.push_back(static_cast<std::uint8_t>(match.length));
-                position += match.length;
-            } else {
-                output.push_back(block[position++]);
-            }
-        }
-    }
-    return output;
-}
-
-Block lz77_lite_decode(const std::vector<std::uint8_t>& encoded,
-                       std::size_t output_size) {
-    constexpr std::size_t kMinMatch = 3;
-    Block output;
-    output.reserve(output_size);
-    std::size_t input = 0;
-    while (output.size() < output_size) {
-        if (input >= encoded.size()) {
-            throw std::runtime_error("truncated LZ77-lite flags");
-        }
-        const auto flags = encoded[input++];
-        for (unsigned token = 0; token < 8 && output.size() < output_size; ++token) {
-            if ((flags & (1U << token)) == 0) {
-                if (input >= encoded.size()) {
-                    throw std::runtime_error("truncated LZ77-lite literal");
-                }
-                output.push_back(encoded[input++]);
-            } else {
-                if (input + 1 >= encoded.size()) {
-                    throw std::runtime_error("truncated LZ77-lite match");
-                }
-                const auto offset = encoded[input++];
-                const auto length = encoded[input++];
-                if (offset == 0 || offset > output.size() || length < kMinMatch ||
-                    output.size() + length > output_size) {
-                    throw std::runtime_error("invalid LZ77-lite match");
-                }
-                for (unsigned i = 0; i < length; ++i) {
-                    output.push_back(output[output.size() - offset]);
-                }
-            }
-        }
-    }
-    return output;
-}
-
-std::size_t lz77_lite_encoded_size(const Block& block) {
-    return std::min(lz77_lite_encode(block).size(), block.size());
-}
-
-std::vector<std::uint8_t> lz4_encode(const Block& block) {
-    if (block.empty()) {
-        throw std::invalid_argument("LZ4 requires a non-empty block");
-    }
-    if (block.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        throw std::invalid_argument("LZ4 block is too large");
-    }
-    const auto input_size = static_cast<int>(block.size());
-    std::vector<std::uint8_t> output(
-        static_cast<std::size_t>(LZ4_compressBound(input_size)));
-    const auto written = LZ4_compress_default(
-        reinterpret_cast<const char*>(block.data()),
-        reinterpret_cast<char*>(output.data()), input_size,
-        static_cast<int>(output.size()));
-    if (written <= 0) {
-        throw std::runtime_error("LZ4 compression failed");
-    }
-    output.resize(static_cast<std::size_t>(written));
-    return output;
-}
-
-Block lz4_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size) {
-    if (encoded.empty() || output_size == 0 ||
-        encoded.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-        output_size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        throw std::invalid_argument("invalid LZ4 stream or output size");
-    }
-    Block output(output_size);
-    const auto decoded = LZ4_decompress_safe(
-        reinterpret_cast<const char*>(encoded.data()),
-        reinterpret_cast<char*>(output.data()), static_cast<int>(encoded.size()),
-        static_cast<int>(output_size));
-    if (decoded != static_cast<int>(output_size)) {
-        throw std::runtime_error("LZ4 decompression failed");
-    }
-    return output;
-}
-
-std::size_t lz4_encoded_size(const Block& block) {
-    return std::min(lz4_encode(block).size(), block.size());
-}
-
 std::vector<std::uint8_t> huffman_encode(const Block& block) {
     if (block.empty()) {
         throw std::invalid_argument("Huffman requires a non-empty block");
@@ -1088,38 +937,6 @@ std::size_t huffman_encoded_size(const Block& block) {
     return std::min(huffman_encode(block).size(), block.size());
 }
 
-std::vector<std::uint8_t> zstd_encode(const Block& block) {
-    if (block.empty()) {
-        throw std::invalid_argument("Zstd requires a non-empty block");
-    }
-    std::vector<std::uint8_t> output(ZSTD_compressBound(block.size()));
-    const auto written = ZSTD_compress(output.data(), output.size(), block.data(),
-                                       block.size(), 1);
-    if (ZSTD_isError(written)) {
-        throw std::runtime_error(std::string("Zstd compression failed: ") +
-                                 ZSTD_getErrorName(written));
-    }
-    output.resize(written);
-    return output;
-}
-
-Block zstd_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size) {
-    if (encoded.empty() || output_size == 0) {
-        throw std::invalid_argument("invalid Zstd stream or output size");
-    }
-    Block output(output_size);
-    const auto decoded = ZSTD_decompress(output.data(), output.size(), encoded.data(),
-                                         encoded.size());
-    if (ZSTD_isError(decoded) || decoded != output_size) {
-        throw std::runtime_error("Zstd decompression failed");
-    }
-    return output;
-}
-
-std::size_t zstd_encoded_size(const Block& block) {
-    return std::min(zstd_encode(block).size(), block.size());
-}
-
 std::size_t baseline_encoded_size(const Block& block, BaselineKind kind) {
     switch (kind) {
         case BaselineKind::Fpc:
@@ -1132,12 +949,6 @@ std::size_t baseline_encoded_size(const Block& block, BaselineKind kind) {
             return cpack_encoded_size(block);
         case BaselineKind::Bpc:
             return bpc_encoded_size(block);
-        case BaselineKind::Zstd:
-            return zstd_encoded_size(block);
-        case BaselineKind::Lz4:
-            return lz4_encoded_size(block);
-        case BaselineKind::Lz77Lite:
-            return lz77_lite_encoded_size(block);
         case BaselineKind::Huffman:
             return huffman_encoded_size(block);
     }

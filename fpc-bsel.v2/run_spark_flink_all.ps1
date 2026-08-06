@@ -6,7 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 $rootPath = (Resolve-Path $Root).Path
 $bsel = Join-Path $rootPath "build-release/bsel.exe"
-$fpcBsel = Join-Path $PSScriptRoot "build/fpc-bsel.exe"
+$fpcBsel = Join-Path $PSScriptRoot "build/fpc-bsel-v2.exe"
 $traceDir = Join-Path $rootPath "datasets/spark-flink/traces"
 $outputPath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot $OutputDir))
 New-Item -ItemType Directory -Force $outputPath | Out-Null

@@ -138,22 +138,20 @@ not a comparison against BDI, BPC, or other published codecs.
   --ideal-metadata-bytes 1
 ```
 
-`compare` runs cache-line baselines against a trained Byte-Select model. Zstd
-uses a real level-1 libzstd frame per cache line and LZ4 uses a real liblz4
-block; both sizes come from payloads covered by round-trip tests.
-using the model's same target sizes. It covers the FPC word-prefix format, the
+`compare` runs cache-line baselines against a trained Byte-Select model using
+the model's same target sizes. It covers the FPC word-prefix format, the
 BDI Table-2 single-base modes, the original C-Pack dictionary scheme (Chen et
 al., TVLSI 18(8), 2010), Bit-Plane Compression (Kim et al., ISCA 2016), plus
-software-style `zstd`, `lz4`, `lz77-lite`, and `huffman`. FPC, BDI, C-Pack,
-BPC, LZ77-lite, and Huffman generate real round-trippable streams; their sizes
+the canonical Huffman format. FPC, BDI, C-Pack, BPC, and Huffman generate real
+round-trippable streams; their sizes
 come from the actual encoded byte vectors. `hybrid` selects the smaller
 FPC/BDI result per block. External raw/compressed selection metadata is not
 charged; BDI's internal mode byte is included in its encoded stream.
 
 ```powershell
 .\build\bsel.exe compare bsel256.model test.trace `
-  --baseline fpc --baseline zstd --baseline lz4 `
-  --baseline lz77-lite --baseline huffman
+  --baseline fpc --baseline bdi --baseline hybrid `
+  --baseline cpack --baseline bpc --baseline huffman
 ```
 
 For a collection of workloads, use `compare-list`. It prints each trace's
@@ -165,7 +163,7 @@ the total traffic or storage result:
 ```text
 bsel compare-list bsel256.model cpu-a.trace cpu-b.trace gpu.trace \
   --baseline fpc --baseline bdi --baseline hybrid --baseline cpack --baseline bpc \
-  --baseline zstd --baseline lz4 --baseline lz77-lite --baseline huffman
+  --baseline huffman
 ```
 
 `compare-groups` accepts the same `--group NAME INPUT [INPUT ...]` syntax and
@@ -187,12 +185,9 @@ single-one, and 1-bit-flag fallback), with `ceil(log2(symbols))`-bit position
 fields that reproduce the published 5-bit fields on the paper's 32-symbol
 blocks. These definitions are intentionally documented because alternative
 FPC zero-run, multi-base BDI, and dictionary/replacement variants have
-different byte counts. LZ77-lite emits groups of eight real tokens with a flag
-byte and literal or 8-bit offset/length payloads. Huffman serializes its symbol/
-code-length table followed by a canonical Huffman bitstream. Tests decode all
-three formats and require byte-for-byte equality. The in-process `zstd`/`lz4`
-cache-line paths remain modeled; use the official CLI measurements for exact
-whole-stream bitstreams and ratios.
+different byte counts. Huffman serializes its symbol/code-length table followed
+by a canonical Huffman bitstream. Tests decode every retained baseline format
+and require byte-for-byte equality.
 
 ## Algorithm-Side Reproduction on Representative Traces
 

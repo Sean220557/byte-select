@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(byte_select LANGUAGES C CXX ASM)
+project(byte_select LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -15,23 +15,6 @@ add_library(byte_select
     src/rtl.cpp
 )
 target_include_directories(byte_select PUBLIC include)
-
-# The software baselines must be measured from real, decodable payloads.  Build
-# the vendored reference libraries instead of using analytical size models.
-set(LZ4_BUILD_CLI OFF CACHE BOOL "" FORCE)
-set(LZ4_BUNDLED_MODE ON CACHE BOOL "" FORCE)
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-set(BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
-add_subdirectory(third_party/lz4/build/cmake third_party/lz4 EXCLUDE_FROM_ALL)
-
-set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
-set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
-add_subdirectory(third_party/zstd/build/cmake third_party/zstd EXCLUDE_FROM_ALL)
-target_link_libraries(byte_select PRIVATE lz4_static libzstd_static)
 
 if(MSVC)
     target_compile_options(byte_select PRIVATE /W4)
@@ -144,8 +127,7 @@ add_test(
     COMMAND bsel compare "${BSEL_COMPARE_MODEL}"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/codec.cpp"
             --baseline fpc --baseline bdi --baseline hybrid
-            --baseline cpack --baseline bpc --baseline zstd
-            --baseline lz4 --baseline lz77-lite --baseline huffman
+            --baseline cpack --baseline bpc --baseline huffman
 )
 set_tests_properties(byte_select_compare PROPERTIES DEPENDS byte_select_compare_train)
 add_test(
@@ -154,7 +136,7 @@ add_test(
             --group codec "${CMAKE_CURRENT_SOURCE_DIR}/src/codec.cpp"
             --group baseline "${CMAKE_CURRENT_SOURCE_DIR}/src/baseline.cpp"
             --baseline fpc --baseline bdi --baseline cpack --baseline bpc
-            --baseline zstd --baseline lz4 --baseline lz77-lite --baseline huffman
+            --baseline huffman
 )
 set_tests_properties(
     byte_select_compare_groups
@@ -227,8 +209,7 @@ add_test(
             "${CMAKE_CURRENT_SOURCE_DIR}/src/codec.cpp"
             "${CMAKE_CURRENT_SOURCE_DIR}/src/baseline.cpp"
             --baseline fpc --baseline bdi --baseline hybrid
-            --baseline cpack --baseline bpc --baseline zstd
-            --baseline lz4 --baseline lz77-lite --baseline huffman
+            --baseline cpack --baseline bpc --baseline huffman
 )
 set_tests_properties(
     byte_select_compare_list

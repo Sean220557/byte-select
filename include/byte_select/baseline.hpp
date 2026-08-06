@@ -15,9 +15,6 @@ enum class BaselineKind {
     HybridBdiFpc,
     Cpack,
     Bpc,
-    Zstd,
-    Lz4,
-    Lz77Lite,
     Huffman
 };
 
@@ -48,13 +45,6 @@ std::vector<std::uint8_t> cpack_encode(const Block& block);
 Block cpack_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size);
 std::vector<std::uint8_t> bpc_encode(const Block& block);
 Block bpc_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size);
-std::vector<std::uint8_t> lz77_lite_encode(const Block& block);
-Block lz77_lite_decode(const std::vector<std::uint8_t>& encoded,
-                       std::size_t output_size);
-std::vector<std::uint8_t> lz4_encode(const Block& block);
-Block lz4_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size);
-std::vector<std::uint8_t> zstd_encode(const Block& block);
-Block zstd_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size);
 std::vector<std::uint8_t> huffman_encode(const Block& block);
 Block huffman_decode(const std::vector<std::uint8_t>& encoded,
                      std::size_t output_size);
@@ -65,9 +55,6 @@ std::size_t fpc_encoded_size(const Block& block);
 std::size_t bdi_encoded_size(const Block& block);
 std::size_t cpack_encoded_size(const Block& block);
 std::size_t bpc_encoded_size(const Block& block);
-std::size_t zstd_encoded_size(const Block& block);
-std::size_t lz4_encoded_size(const Block& block);
-std::size_t lz77_lite_encoded_size(const Block& block);
 std::size_t huffman_encoded_size(const Block& block);
 std::size_t baseline_encoded_size(const Block& block, BaselineKind kind);
 

@@ -13,7 +13,7 @@ output_dir=$(realpath "$output_dir")
 
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 bsel="$repo_dir/build-release/bsel"
-fpc_bsel="$repo_dir/fpc-bsel/build/fpc-bsel"
+fpc_bsel="$repo_dir/fpc-bsel.v2/build/fpc-bsel-v2"
 
 [[ -x "$bsel" ]] || { echo "missing executable: $bsel" >&2; exit 2; }
 [[ -x "$fpc_bsel" ]] || { echo "missing executable: $fpc_bsel" >&2; exit 2; }

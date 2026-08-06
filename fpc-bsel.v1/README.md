@@ -1,4 +1,9 @@
-# Standalone FPC-BSEL
+# Standalone FPC-BSEL v1
+
+This is an independent optimized fork of `fpc-bsel`; the original source tree
+is not modified. Version 1 uses one-byte BSEL IDs for models of up to 256
+patterns, ranks training candidates by real byte savings instead of frequency,
+and reports prefix-only and residual-only ablations during evaluation.
 
 This directory is a self-contained implementation. It does not link to or
 modify the repository's existing FPC or Byte-Select implementation.
@@ -15,17 +20,17 @@ smallest real stream among raw, conventional FPC, and FPC+BSEL.
 Linux/server:
 
 ```bash
-cmake -S fpc-bsel -B fpc-bsel/build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build fpc-bsel/build -j
-ctest --test-dir fpc-bsel/build --output-on-failure
+cmake -S fpc-bsel.v1 -B fpc-bsel.v1/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build fpc-bsel.v1/build -j
+ctest --test-dir fpc-bsel.v1/build --output-on-failure
 ```
 
 Windows PowerShell:
 
 ```powershell
-cmake -S fpc-bsel -B fpc-bsel/build -G Ninja
-cmake --build fpc-bsel/build
-ctest --test-dir fpc-bsel/build --output-on-failure
+cmake -S fpc-bsel.v1 -B fpc-bsel.v1/build -G Ninja
+cmake --build fpc-bsel.v1/build
+ctest --test-dir fpc-bsel.v1/build --output-on-failure
 ```
 
 ## CLI
@@ -33,11 +38,11 @@ ctest --test-dir fpc-bsel/build --output-on-failure
 Inputs must be non-empty multiples of 64 bytes.
 
 ```powershell
-fpc-bsel train TRAIN.bin model.fpcb --max-patterns 256
-fpc-bsel evaluate model.fpcb TEST.bin
-fpc-bsel roundtrip model.fpcb TEST.bin
-fpc-bsel compress model.fpcb TEST.bin TEST.fpz
-fpc-bsel decompress model.fpcb TEST.fpz restored.bin
+fpc-bsel-v1 train TRAIN.bin model.fpcb --max-patterns 256
+fpc-bsel-v1 evaluate model.fpcb TEST.bin
+fpc-bsel-v1 roundtrip model.fpcb TEST.bin
+fpc-bsel-v1 compress model.fpcb TEST.bin TEST.fpz
+fpc-bsel-v1 decompress model.fpcb TEST.fpz restored.bin
 ```
 
 The encoded block mode and FPC+BSEL flags are included in reported sizes.

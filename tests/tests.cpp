@@ -242,43 +242,21 @@ void test_baseline_size_evaluators() {
               "BDI, C-Pack, and BPC round-trip randomized cache lines");
     }
 
-    check(bsel::parse_baseline_kind("zstd") == bsel::BaselineKind::Zstd &&
-              bsel::parse_baseline_kind("lz4") == bsel::BaselineKind::Lz4 &&
-              bsel::parse_baseline_kind("lz77-lite") == bsel::BaselineKind::Lz77Lite &&
-              bsel::parse_baseline_kind("huffman") == bsel::BaselineKind::Huffman,
+    check(bsel::parse_baseline_kind("huffman") == bsel::BaselineKind::Huffman,
           "software baseline kinds parse");
-    check(bsel::lz77_lite_encoded_size(zeros) < zeros.size() &&
-              bsel::lz4_encoded_size(zeros) < zeros.size() &&
-              bsel::huffman_encoded_size(zeros) < zeros.size() &&
-              bsel::zstd_encoded_size(zeros) < zeros.size(),
+    check(bsel::huffman_encoded_size(zeros) < zeros.size(),
           "software baselines compress all-zero cache lines");
-    check(bsel::lz77_lite_encoded_size(raw) == raw.size() &&
-              bsel::lz4_encoded_size(raw) == raw.size() &&
-              bsel::huffman_encoded_size(raw) <= raw.size() &&
-              bsel::zstd_encoded_size(raw) <= raw.size(),
+    check(bsel::huffman_encoded_size(raw) <= raw.size(),
           "software baselines do not expand random cache lines");
     const auto fpc_stream = bsel::fpc_encode(small_words);
-    const auto lz77_stream = bsel::lz77_lite_encode(repeated64);
     const auto huffman_stream = bsel::huffman_encode(repeated64);
-    const auto lz4_stream = bsel::lz4_encode(repeated64);
-    const auto zstd_stream = bsel::zstd_encode(repeated64);
     check(fpc_stream.size() == 22 &&
               bsel::fpc_decode(fpc_stream, small_words.size()) == small_words,
           "FPC size comes from a round-trippable tag/payload bitstream");
-    check(lz77_stream.size() < repeated64.size() &&
-              bsel::lz77_lite_decode(lz77_stream, repeated64.size()) == repeated64,
-          "LZ77-lite size comes from a round-trippable LZSS token stream");
     check(huffman_stream.size() < repeated64.size() &&
               bsel::huffman_decode(huffman_stream, repeated64.size()) == repeated64,
           "Huffman size comes from a round-trippable canonical-code bitstream");
-    check(lz4_stream.size() < repeated64.size() &&
-              bsel::lz4_decode(lz4_stream, repeated64.size()) == repeated64,
-          "LZ4 size comes from the reference library's round-trippable block stream");
-    check(zstd_stream.size() < repeated64.size() &&
-              bsel::zstd_decode(zstd_stream, repeated64.size()) == repeated64,
-          "Zstd size comes from the reference library's round-trippable frame");
     check(bsel::fpc_decode(bsel::fpc_encode(raw), raw.size()) == raw &&
-              bsel::lz77_lite_decode(bsel::lz77_lite_encode(raw), raw.size()) == raw &&
               bsel::huffman_decode(bsel::huffman_encode(raw), raw.size()) == raw,
           "real baseline codecs round-trip incompressible data before raw fallback");
 }
