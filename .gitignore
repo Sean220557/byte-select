@@ -31,3 +31,4 @@ gapbs-master/benchmark/graphs/lite/
 .DS_Store
 Thumbs.db
 *.log
+tools/__pycache__/
