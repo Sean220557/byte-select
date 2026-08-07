@@ -296,42 +296,49 @@ std::vector<std::uint8_t> fpc_encode(const Block& block) {
     if (block.empty() || block.size() % 4 != 0) {
         throw std::invalid_argument("FPC requires a non-empty block divisible by four bytes");
     }
-    BitWriter writer;
-    for (std::size_t offset = 0; offset < block.size(); offset += 4) {
-        const auto value = static_cast<std::uint32_t>(load_little_endian(block, offset, 4));
-        if (value == 0) {
-            writer.put(0, 3);
-        } else if (is_sign_extended(value, 4)) {
-            writer.put(1, 3);
-            writer.put(value & 0xfU, 4);
-        } else {
-            const auto byte = static_cast<std::uint8_t>(value);
-            if (((value >> 8U) & 0xffU) == byte &&
-                ((value >> 16U) & 0xffU) == byte &&
-                ((value >> 24U) & 0xffU) == byte) {
-                writer.put(2, 3);
-                writer.put(byte, 8);
-            } else if (is_sign_extended(value, 8)) {
-                writer.put(3, 3);
-                writer.put(value & 0xffU, 8);
-            } else if (is_sign_extended(value, 16)) {
-                writer.put(4, 3);
-                writer.put(value & 0xffffU, 16);
-            } else if ((value & 0xffffU) == 0) {
-                writer.put(5, 3);
-                writer.put(value >> 16U, 16);
-            } else if (halfword_is_sign_extended_byte(static_cast<std::uint16_t>(value)) &&
-                       halfword_is_sign_extended_byte(
-                           static_cast<std::uint16_t>(value >> 16U))) {
-                writer.put(6, 3);
+    std::vector<std::uint32_t> values;
+    std::vector<std::uint8_t> tags;
+    values.reserve(block.size() / 4);
+    tags.reserve(block.size() / 4);
+    auto classify = [](std::uint32_t value) {
+        if (value == 0) return std::uint8_t{0};
+        if (is_sign_extended(value, 4)) return std::uint8_t{1};
+        const auto byte = static_cast<std::uint8_t>(value);
+        if (((value >> 8U) & 0xffU) == byte &&
+            ((value >> 16U) & 0xffU) == byte &&
+            ((value >> 24U) & 0xffU) == byte) return std::uint8_t{2};
+        if (is_sign_extended(value, 8)) return std::uint8_t{3};
+        if (is_sign_extended(value, 16)) return std::uint8_t{4};
+        if ((value & 0xffffU) == 0) return std::uint8_t{5};
+        if (halfword_is_sign_extended_byte(static_cast<std::uint16_t>(value)) &&
+            halfword_is_sign_extended_byte(static_cast<std::uint16_t>(value >> 16U)))
+            return std::uint8_t{6};
+        return std::uint8_t{7};
+    };
+    auto write_payload = [](BitWriter& writer, std::uint8_t tag, std::uint32_t value) {
+        switch (tag) {
+            case 0: break;
+            case 1: writer.put(value & 0xfU, 4); break;
+            case 2:
+            case 3: writer.put(value & 0xffU, 8); break;
+            case 4: writer.put(value & 0xffffU, 16); break;
+            case 5: writer.put(value >> 16U, 16); break;
+            case 6:
                 writer.put(value & 0xffU, 8);
                 writer.put((value >> 16U) & 0xffU, 8);
-            } else {
-                writer.put(7, 3);
-                writer.put(value, 32);
-            }
+                break;
+            case 7: writer.put(value, 32); break;
+            default: throw std::runtime_error("invalid FPC tag");
         }
+    };
+    for (std::size_t offset = 0; offset < block.size(); offset += 4) {
+        const auto value = static_cast<std::uint32_t>(load_little_endian(block, offset, 4));
+        values.push_back(value);
+        tags.push_back(classify(value));
     }
+    BitWriter writer;
+    for (const auto tag : tags) writer.put(tag, 3);
+    for (std::size_t i = 0; i < values.size(); ++i) write_payload(writer, tags[i], values[i]);
     return writer.bytes();
 }
 
@@ -340,10 +347,14 @@ Block fpc_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_si
         throw std::invalid_argument("FPC output size must be divisible by four bytes");
     }
     BitReader reader(encoded);
+    const auto words = output_size / 4;
+    std::vector<std::uint8_t> tags;
+    tags.reserve(words);
+    for (std::size_t word = 0; word < words; ++word)
+        tags.push_back(static_cast<std::uint8_t>(reader.get(3)));
     Block output;
     output.reserve(output_size);
-    while (output.size() < output_size) {
-        const auto tag = reader.get(3);
+    for (const auto tag : tags) {
         std::uint32_t value = 0;
         switch (tag) {
             case 0: break;

@@ -187,24 +187,29 @@ std::size_t raw_residual_size(const std::array<std::uint8_t, kWordCount>& tags) 
 
 Bytes fpc_encode(const Bytes& block) {
     if (block.size() != kBlockSize) throw std::invalid_argument("FPC requires 64-byte blocks");
-    BitWriter writer;
+    std::array<std::uint8_t, kWordCount> tags{};
+    std::array<std::uint32_t, kWordCount> values{};
     for (std::size_t word = 0; word < kWordCount; ++word) {
-        const auto value = load32(block, word * 4);
-        const auto tag = classify(value);
-        writer.put(tag, 3);
-        write_payload(writer, tag, value);
+        values[word] = load32(block, word * 4);
+        tags[word] = classify(values[word]);
+    }
+    BitWriter writer;
+    for (const auto tag : tags) writer.put(tag, 3);
+    for (std::size_t word = 0; word < kWordCount; ++word) {
+        write_payload(writer, tags[word], values[word]);
     }
     return writer.bytes();
 }
 
 Bytes fpc_decode(const Bytes& encoded) {
     BitReader reader(encoded);
+    std::array<std::uint8_t, kWordCount> tags{};
+    for (auto& tag : tags) tag = static_cast<std::uint8_t>(reader.get(3));
     Bytes output;
     output.reserve(kBlockSize);
-    std::size_t used_bits = 0;
-    for (std::size_t word = 0; word < kWordCount; ++word) {
-        const auto tag = static_cast<std::uint8_t>(reader.get(3));
-        used_bits += 3 + payload_bits(tag);
+    std::size_t used_bits = kWordCount * 3U;
+    for (const auto tag : tags) {
+        used_bits += payload_bits(tag);
         store32(output, read_payload(reader, tag));
     }
     if (encoded.size() != (used_bits + 7U) / 8U)
