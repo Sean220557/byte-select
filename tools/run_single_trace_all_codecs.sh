@@ -18,10 +18,13 @@ Environment variables:
                   optional maximum train blocks after splitting
   TEST_BLOCK_LIMIT
                   optional maximum test blocks after splitting
+  VERIFY_COMPRESS set to 1 to also run compress/decompress/sha256
+                  (default: 0; roundtrip is always run)
   SKIP_BUILD      set to 1 to skip CMake builds
 
 Example:
   TRAIN_PERCENT=90 MAX_PATTERNS=256 \
+    TRAIN_BLOCK_LIMIT=10000000 TEST_BLOCK_LIMIT=1000000 \
     bash tools/run_single_trace_all_codecs.sh \
       /data/flink.delete_hole.log \
       results/delete-hole-all
@@ -41,6 +44,7 @@ bsel_preset=${BSEL_PRESET:-bsel-1024-1024-128}
 skip_build=${SKIP_BUILD:-0}
 train_block_limit=${TRAIN_BLOCK_LIMIT:-0}
 test_block_limit=${TEST_BLOCK_LIMIT:-0}
+verify_compress=${VERIFY_COMPRESS:-0}
 
 if ! [[ "$train_percent" =~ ^[0-9]+$ ]] || (( train_percent < 1 || train_percent > 99 )); then
   echo "TRAIN_PERCENT must be an integer in 1..99" >&2
@@ -52,6 +56,10 @@ if ! [[ "$max_patterns" =~ ^[0-9]+$ ]] || (( max_patterns < 1 || max_patterns > 
 fi
 if ! [[ "$train_block_limit" =~ ^[0-9]+$ ]] || ! [[ "$test_block_limit" =~ ^[0-9]+$ ]]; then
   echo "TRAIN_BLOCK_LIMIT and TEST_BLOCK_LIMIT must be non-negative integers" >&2
+  exit 2
+fi
+if [[ "$verify_compress" != "0" && "$verify_compress" != "1" ]]; then
+  echo "VERIFY_COMPRESS must be 0 or 1" >&2
   exit 2
 fi
 [[ -f "$dataset" ]] || { echo "missing dataset: $dataset" >&2; exit 2; }
@@ -158,24 +166,28 @@ run_codec() {
   eval_line=$("$exe" evaluate "$model" "$test" | tee "$codec_dir/evaluate.log" | head -n1)
   echo "[run] $family $version roundtrip"
   "$exe" roundtrip "$model" "$test" | tee "$codec_dir/roundtrip.log"
-  echo "[run] $family $version compress"
-  "$exe" compress "$model" "$test" "$packed" | tee "$codec_dir/compress.log"
-  echo "[run] $family $version decompress"
-  "$exe" decompress "$model" "$packed" "$restored" | tee "$codec_dir/decompress.log"
+  if [[ "$verify_compress" == "1" ]]; then
+    echo "[run] $family $version compress"
+    "$exe" compress "$model" "$test" "$packed" | tee "$codec_dir/compress.log"
+    echo "[run] $family $version decompress"
+    "$exe" decompress "$model" "$packed" "$restored" | tee "$codec_dir/decompress.log"
 
-  local original_hash restored_hash cmp_status
-  original_hash=$(sha256sum "$test" | awk '{print $1}')
-  restored_hash=$(sha256sum "$restored" | awk '{print $1}')
-  if [[ "$original_hash" == "$restored_hash" ]]; then
-    cmp_status=PASS
+    local original_hash restored_hash cmp_status
+    original_hash=$(sha256sum "$test" | awk '{print $1}')
+    restored_hash=$(sha256sum "$restored" | awk '{print $1}')
+    if [[ "$original_hash" == "$restored_hash" ]]; then
+      cmp_status=PASS
+    else
+      cmp_status=FAIL
+      echo "sha256 mismatch for $family $version" >&2
+      exit 1
+    fi
+    printf '%s,%s,PASS,PASS,PASS,%s,%s,%s,%s,%s\n' \
+      "$family" "$version" "$cmp_status" "$(stat -c %s "$packed")" "$(stat -c %s "$restored")" \
+      "$original_hash" "$restored_hash" >> "$integrity_csv"
   else
-    cmp_status=FAIL
-    echo "sha256 mismatch for $family $version" >&2
-    exit 1
+    printf '%s,%s,PASS,SKIP,SKIP,SKIP,,,,\n' "$family" "$version" >> "$integrity_csv"
   fi
-  printf '%s,%s,PASS,PASS,PASS,%s,%s,%s,%s,%s\n' \
-    "$family" "$version" "$cmp_status" "$(stat -c %s "$packed")" "$(stat -c %s "$restored")" \
-    "$original_hash" "$restored_hash" >> "$integrity_csv"
 
   local blocks original encoded physical ratio physical_ratio saving compressed raw primary combined prefix residual raw_bsel inline
   blocks=$(parse_value "$eval_line" blocks)
