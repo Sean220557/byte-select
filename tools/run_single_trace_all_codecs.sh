@@ -61,6 +61,8 @@ mkdir -p "$out_dir"
 out_dir=$(realpath "$out_dir")
 
 if [[ "$skip_build" != "1" ]]; then
+  export CXXFLAGS="${CXXFLAGS:-} -O3 -DNDEBUG"
+  export CFLAGS="${CFLAGS:-} -O3 -DNDEBUG"
   cmake -S "$repo_dir" -B "$repo_dir/build-release" -G Ninja -DCMAKE_BUILD_TYPE=Release
   cmake --build "$repo_dir/build-release" -j
 
