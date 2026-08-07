@@ -14,6 +14,10 @@ Environment variables:
   MAX_PATTERNS    BSEL patterns for standalone variants (default: 256)
   BSEL_PRESET     main BSEL preset for baseline compare
                   (default: bsel-1024-1024-128)
+  TRAIN_BLOCK_LIMIT
+                  optional maximum train blocks after splitting
+  TEST_BLOCK_LIMIT
+                  optional maximum test blocks after splitting
   SKIP_BUILD      set to 1 to skip CMake builds
 
 Example:
@@ -35,6 +39,8 @@ train_percent=${TRAIN_PERCENT:-90}
 max_patterns=${MAX_PATTERNS:-256}
 bsel_preset=${BSEL_PRESET:-bsel-1024-1024-128}
 skip_build=${SKIP_BUILD:-0}
+train_block_limit=${TRAIN_BLOCK_LIMIT:-0}
+test_block_limit=${TEST_BLOCK_LIMIT:-0}
 
 if ! [[ "$train_percent" =~ ^[0-9]+$ ]] || (( train_percent < 1 || train_percent > 99 )); then
   echo "TRAIN_PERCENT must be an integer in 1..99" >&2
@@ -42,6 +48,10 @@ if ! [[ "$train_percent" =~ ^[0-9]+$ ]] || (( train_percent < 1 || train_percent
 fi
 if ! [[ "$max_patterns" =~ ^[0-9]+$ ]] || (( max_patterns < 1 || max_patterns > 65535 )); then
   echo "MAX_PATTERNS must be an integer in 1..65535" >&2
+  exit 2
+fi
+if ! [[ "$train_block_limit" =~ ^[0-9]+$ ]] || ! [[ "$test_block_limit" =~ ^[0-9]+$ ]]; then
+  echo "TRAIN_BLOCK_LIMIT and TEST_BLOCK_LIMIT must be non-negative integers" >&2
   exit 2
 fi
 [[ -f "$dataset" ]] || { echo "missing dataset: $dataset" >&2; exit 2; }
@@ -69,33 +79,52 @@ aligned="$trace_dir/input.aligned.trace"
 train="$trace_dir/train.trace"
 test="$trace_dir/test.trace"
 
-python3 - "$dataset" "$aligned" "$train" "$test" "$train_percent" <<'PY'
+python3 - "$dataset" "$aligned" "$train" "$test" "$train_percent" "$train_block_limit" "$test_block_limit" <<'PY'
 from pathlib import Path
 import sys
 
-src, aligned, train, test, pct = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
-data = Path(src).read_bytes()
-usable = (len(data) // 64) * 64
+src, aligned, train, test = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+pct, train_limit, test_limit = int(sys.argv[5]), int(sys.argv[6]), int(sys.argv[7])
+source = Path(src)
+total_size = source.stat().st_size
+usable = (total_size // 64) * 64
 if usable == 0:
     raise SystemExit("input has no complete 64-byte blocks")
-data = data[:usable]
 blocks = usable // 64
 cut = max(1, min(blocks - 1, blocks * pct // 100)) if blocks > 1 else 1
 if blocks == 1:
-    train_data = data
-    test_data = data
+    train_start, train_blocks = 0, 1
+    test_start, test_blocks = 0, 1
 else:
-    train_data = data[:cut * 64]
-    test_data = data[cut * 64:]
-Path(aligned).write_bytes(data)
-Path(train).write_bytes(train_data)
-Path(test).write_bytes(test_data)
-print(f"original_bytes={Path(src).stat().st_size}")
-print(f"aligned_bytes={len(data)}")
-print(f"dropped_tail_bytes={Path(src).stat().st_size - len(data)}")
+    train_start, train_blocks = 0, cut
+    test_start, test_blocks = cut, blocks - cut
+if train_limit:
+    train_blocks = min(train_blocks, train_limit)
+if test_limit:
+    test_blocks = min(test_blocks, test_limit)
+
+def copy_region(out_path, start_block, block_count):
+    remaining = block_count * 64
+    offset = start_block * 64
+    chunk = 64 * 1024 * 16
+    with source.open("rb") as inp, Path(out_path).open("wb") as out:
+        inp.seek(offset)
+        while remaining:
+            data = inp.read(min(chunk, remaining))
+            if not data:
+                raise RuntimeError("unexpected EOF while preparing split")
+            out.write(data)
+            remaining -= len(data)
+
+copy_region(aligned, 0, blocks)
+copy_region(train, train_start, train_blocks)
+copy_region(test, test_start, test_blocks)
+print(f"original_bytes={total_size}")
+print(f"aligned_bytes={usable}")
+print(f"dropped_tail_bytes={total_size - usable}")
 print(f"total_blocks={blocks}")
-print(f"train_blocks={len(train_data)//64}")
-print(f"test_blocks={len(test_data)//64}")
+print(f"train_blocks={train_blocks}")
+print(f"test_blocks={test_blocks}")
 PY
 
 summary_csv="$out_dir/summary.csv"
@@ -120,11 +149,16 @@ run_codec() {
   local model="$codec_dir/model.bin"
   local packed="$codec_dir/test.packed"
   local restored="$codec_dir/test.restored.trace"
+  echo "[run] $family $version train"
   "$exe" train "$train" "$model" --max-patterns "$max_patterns" | tee "$codec_dir/train.log"
   local eval_line
+  echo "[run] $family $version evaluate"
   eval_line=$("$exe" evaluate "$model" "$test" | tee "$codec_dir/evaluate.log" | head -n1)
+  echo "[run] $family $version roundtrip"
   "$exe" roundtrip "$model" "$test" | tee "$codec_dir/roundtrip.log"
+  echo "[run] $family $version compress"
   "$exe" compress "$model" "$test" "$packed" | tee "$codec_dir/compress.log"
+  echo "[run] $family $version decompress"
   "$exe" decompress "$model" "$packed" "$restored" | tee "$codec_dir/decompress.log"
 
   local original_hash restored_hash cmp_status
@@ -173,9 +207,11 @@ run_codec cpack-bsel v1 "$repo_dir/cpack-bsel.v1/build/cpack-bsel-v1"
 run_codec cpack-bsel v2 "$repo_dir/cpack-bsel.v2/build/cpack-bsel-v2"
 
 bsel_model="$out_dir/bsel-${bsel_preset}.model"
+echo "[run] baseline bsel train"
 "$bsel" train "$train" "$bsel_model" --block-size 64 --threshold 16 --paper-config "$bsel_preset" \
   | tee "$out_dir/bsel-train.log"
 baseline_log="$out_dir/baseline-compare.log"
+echo "[run] baseline compare"
 "$bsel" compare "$bsel_model" "$test" \
   --baseline fpc --baseline bdi --baseline hybrid --baseline cpack --baseline bpc --baseline huffman \
   | tee "$baseline_log"
