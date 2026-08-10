@@ -3,11 +3,13 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'EOF'
-usage: tools/run_single_trace_all_codecs.sh DATASET_FILE OUTPUT_DIR
+usage: tools/run_single_trace_all_codecs.sh DATASET_FILE_OR_DIR OUTPUT_DIR
 
 Runs every standalone codec variant and all main-project baselines on one
-binary trace file. The input is truncated to a 64-byte block boundary, split
-into train/test, then verified with roundtrip + compress/decompress + sha256.
+binary trace file. If the input is a directory, every regular file directly
+under it is treated as a dataset and run in parallel. Inputs are truncated to
+a 64-byte block boundary, split into train/test, then verified with roundtrip
++ optional compress/decompress + sha256.
 
 Environment variables:
   TRAIN_PERCENT   train split percentage, integer 1..99 (default: 90)
@@ -20,6 +22,7 @@ Environment variables:
                   optional maximum test blocks after splitting
   VERIFY_COMPRESS set to 1 to also run compress/decompress/sha256
                   (default: 0; roundtrip is always run)
+  DATASET_JOBS    parallel datasets when input is a directory (default: 2)
   SKIP_BUILD      set to 1 to skip CMake builds
 
 Example:
@@ -36,7 +39,7 @@ if [[ $# -ne 2 ]]; then
   exit 2
 fi
 
-dataset=$(realpath "$1")
+input_path=$(realpath "$1")
 out_dir=$2
 train_percent=${TRAIN_PERCENT:-90}
 max_patterns=${MAX_PATTERNS:-256}
@@ -45,6 +48,7 @@ skip_build=${SKIP_BUILD:-0}
 train_block_limit=${TRAIN_BLOCK_LIMIT:-0}
 test_block_limit=${TEST_BLOCK_LIMIT:-0}
 verify_compress=${VERIFY_COMPRESS:-0}
+dataset_jobs=${DATASET_JOBS:-2}
 
 if ! [[ "$train_percent" =~ ^[0-9]+$ ]] || (( train_percent < 1 || train_percent > 99 )); then
   echo "TRAIN_PERCENT must be an integer in 1..99" >&2
@@ -62,7 +66,11 @@ if [[ "$verify_compress" != "0" && "$verify_compress" != "1" ]]; then
   echo "VERIFY_COMPRESS must be 0 or 1" >&2
   exit 2
 fi
-[[ -f "$dataset" ]] || { echo "missing dataset: $dataset" >&2; exit 2; }
+if ! [[ "$dataset_jobs" =~ ^[0-9]+$ ]] || (( dataset_jobs < 1 )); then
+  echo "DATASET_JOBS must be a positive integer" >&2
+  exit 2
+fi
+[[ -e "$input_path" ]] || { echo "missing input: $input_path" >&2; exit 2; }
 
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 mkdir -p "$out_dir"
@@ -79,6 +87,44 @@ if [[ "$skip_build" != "1" ]]; then
     cmake --build "$repo_dir/$dir/build" -j
   done
 fi
+
+if [[ -d "$input_path" ]]; then
+  mapfile -t datasets < <(find "$input_path" -maxdepth 1 -type f | sort)
+  if (( ${#datasets[@]} == 0 )); then
+    echo "no regular dataset files found in: $input_path" >&2
+    exit 2
+  fi
+  echo "[run] directory mode datasets=${#datasets[@]} jobs=$dataset_jobs"
+  pids=()
+  statuses=()
+  for dataset_file in "${datasets[@]}"; do
+    name=$(basename "$dataset_file")
+    safe_name=$(printf '%s' "$name" | sed 's/[^A-Za-z0-9_.-]/_/g')
+    dataset_out="$out_dir/$safe_name"
+    echo "[run] launch dataset=$name out=$dataset_out"
+    SKIP_BUILD=1 "$0" "$dataset_file" "$dataset_out" > "$out_dir/$safe_name.log" 2>&1 &
+    pids+=("$!")
+    if (( ${#pids[@]} >= dataset_jobs )); then
+      if wait "${pids[0]}"; then statuses+=(0); else statuses+=("$?"); fi
+      pids=("${pids[@]:1}")
+    fi
+  done
+  for pid in "${pids[@]}"; do
+    if wait "$pid"; then statuses+=(0); else statuses+=("$?"); fi
+  done
+  failed=0
+  for status in "${statuses[@]}"; do
+    if (( status != 0 )); then failed=1; fi
+  done
+  if (( failed )); then
+    echo "one or more dataset runs failed; inspect logs in $out_dir" >&2
+    exit 1
+  fi
+  echo "completed directory run: $out_dir"
+  exit 0
+fi
+
+dataset="$input_path"
 
 bsel="$repo_dir/build-release/bsel"
 [[ -x "$bsel" ]] || { echo "missing executable: $bsel" >&2; exit 2; }
@@ -126,9 +172,15 @@ def copy_region(out_path, start_block, block_count):
             out.write(data)
             remaining -= len(data)
 
-copy_region(aligned, 0, blocks)
 copy_region(train, train_start, train_blocks)
 copy_region(test, test_start, test_blocks)
+Path(aligned + ".meta").write_text(
+    f"source={source}\n"
+    f"original_bytes={total_size}\n"
+    f"aligned_bytes={usable}\n"
+    f"dropped_tail_bytes={total_size - usable}\n"
+    f"total_blocks={blocks}\n"
+)
 print(f"original_bytes={total_size}")
 print(f"aligned_bytes={usable}")
 print(f"dropped_tail_bytes={total_size - usable}")
@@ -148,6 +200,18 @@ printf 'preset,algorithm,blocks,original_bytes,encoded_bytes,compression_ratio,s
 parse_value() {
   local line=$1 key=$2
   sed -n "s/.*${key}=\([^ ]*\).*/\1/p" <<< "$line"
+}
+
+safe_ratio() {
+  awk -v n="${1:-0}" -v d="${2:-0}" 'BEGIN{if (d == "" || d == 0) printf "%.6f", 0; else printf "%.6f", n/d}'
+}
+
+safe_saving() {
+  awk -v r="${1:-0}" 'BEGIN{if (r == "" || r == 0) printf "%.4f", 0; else printf "%.4f", (1 - 1/r) * 100}'
+}
+
+safe_compressed_percent() {
+  awk -v b="${1:-0}" -v r="${2:-0}" 'BEGIN{if (b == "" || b == 0) printf "%.4f", 0; else printf "%.4f", (1 - r/b) * 100}'
 }
 
 run_codec() {
@@ -194,9 +258,9 @@ run_codec() {
   original=$(parse_value "$eval_line" original_bytes)
   encoded=$(parse_value "$eval_line" encoded_bytes)
   physical=$(parse_value "$eval_line" physical_encoded_bytes)
-  ratio=$(awk -v o="$original" -v e="$encoded" 'BEGIN{printf "%.6f", o/e}')
-  physical_ratio=$(awk -v o="$original" -v p="$physical" 'BEGIN{printf "%.6f", o/p}')
-  saving=$(awk -v r="$ratio" 'BEGIN{printf "%.4f", (1 - 1/r) * 100}')
+  ratio=$(safe_ratio "$original" "$encoded")
+  physical_ratio=$(safe_ratio "$original" "$physical")
+  saving=$(safe_saving "$ratio")
   raw=$(parse_value "$eval_line" raw_blocks)
   primary=$(parse_value "$eval_line" fpc_blocks)
   combined=$(parse_value "$eval_line" fpc_bsel_blocks)
@@ -206,7 +270,7 @@ run_codec() {
   inline=$(parse_value "$eval_line" inline_prefix_id_blocks)
   raw_bsel=${raw_bsel:-0}
   inline=${inline:-0}
-  compressed=$(awk -v b="$blocks" -v r="$raw" 'BEGIN{printf "%.4f", (1 - r/b) * 100}')
+  compressed=$(safe_compressed_percent "$blocks" "$raw")
   printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
     "$family" "$version" "$family-$version" "$blocks" "$original" "$encoded" "$physical" \
     "$ratio" "$physical_ratio" "$saving" "$compressed" "$raw" "$primary" "$combined" \
@@ -238,9 +302,9 @@ write_baseline_row() {
   blocks=$(parse_value "$line" blocks)
   original=$(parse_value "$line" original_bytes)
   encoded=$(parse_value "$line" encoded_bytes)
-  ratio=$(awk -v o="$original" -v e="$encoded" 'BEGIN{printf "%.6f", o/e}')
-  saving=$(awk -v r="$ratio" 'BEGIN{printf "%.4f", (1 - 1/r) * 100}')
-  compressed=$(awk -v f="$(parse_value "$line" compressed_fraction)" 'BEGIN{printf "%.4f", f * 100}')
+  ratio=$(safe_ratio "$original" "$encoded")
+  saving=$(safe_saving "$ratio")
+  compressed=$(awk -v f="$(parse_value "$line" compressed_fraction)" 'BEGIN{if (f == "") printf "%.4f", 0; else printf "%.4f", f * 100}')
   printf '%s,%s,%s,%s,%s,%s,%s,%s\n' "$bsel_preset" "$algorithm" "$blocks" "$original" "$encoded" "$ratio" "$saving" "$compressed" >> "$baseline_csv"
 }
 
