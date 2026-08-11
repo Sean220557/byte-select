@@ -1,6 +1,7 @@
 #include "byte_select/baseline.hpp"
 #include "byte_select/codec.hpp"
 #include "byte_select/model_io.hpp"
+#include "byte_select/mcc.hpp"
 #include "byte_select/paper_config.hpp"
 #include "byte_select/trainer.hpp"
 #include "byte_select/rtl.hpp"
@@ -163,6 +164,28 @@ void test_baseline_size_evaluators() {
     check(bsel::fpc_encoded_size(raw) == 64 && bsel::bdi_encoded_size(raw) == 64,
           "FPC and BDI fall back to an uncompressed random cache line");
 
+    bsel::Block bitshuffle_friendly(128, 0);
+    for (std::size_t word = 0; word < 32; ++word) {
+        store_little_endian(bitshuffle_friendly, word * 4,
+                            0xdeadbeefU ^ (std::uint32_t{1} << word), 4);
+    }
+    check(bsel::fpc_encoded_size(bitshuffle_friendly) <
+              bsel::fpc_encode(bitshuffle_friendly).size(),
+          "FPC encoded-size estimator uses bit-shuffle when it is smaller");
+
+    const auto top256_model = bsel::train_fpc_top256({raw});
+    check(bsel::fpc_top256_encoded_size(raw, top256_model) < bsel::fpc_encoded_size(raw),
+          "FPC Top-256 residual dictionary reduces repeated raw residual payloads");
+    const auto word256_model = bsel::train_fpc_residual_word256({raw});
+    check(bsel::fpc_residual_word256_encoded_size(raw, word256_model) <
+              bsel::fpc_encoded_size(raw),
+          "FPC residual-word dictionary reduces repeated raw residual words");
+    const auto word64_model = bsel::train_fpc_residual_word_dict({raw}, 64);
+    check(word64_model.index_bits == 6 &&
+              bsel::fpc_residual_word256_encoded_size(raw, word64_model) <
+                  bsel::fpc_encoded_size(raw),
+          "FPC residual-word dictionary supports a smaller hardware-friendly table");
+
     const auto bdi = bsel::evaluate_baseline({zeros, sequential64, raw},
                                               bsel::BaselineKind::Bdi, {32, 16, 8});
     check(bdi.original_bytes == 192 && bdi.encoded_bytes == 82 &&
@@ -229,6 +252,9 @@ void test_baseline_size_evaluators() {
               bsel::bpc_decode(bsel::bpc_encode(sequential_words64), sequential_words64.size()) == sequential_words64 &&
               bsel::bpc_decode(bsel::bpc_encode(raw), raw.size()) == raw,
           "BPC base/delta/DBX streams round-trip");
+    bsel::Block zeros256(256, 0);
+    check(bsel::bpc_encoded_size(zeros256) == 4,
+          "BPC encoded-size estimator supports 256-byte sublines as 128-byte chunks");
     for (std::uint32_t seed = 1; seed <= 200; ++seed) {
         bsel::Block fuzz(64);
         auto value = seed;
@@ -452,6 +478,80 @@ void test_model_io() {
           "version-1 models retain their implicit untagged metadata layout");
 }
 
+void test_mcc_layout() {
+    const bsel::Model model{
+        4,
+        {{3, 1, {pattern({0, 0, 1, 0})}},
+         {2, 1, {pattern({0, 0, 0, 0})}}}};
+    const std::vector<bsel::Block> blocks{{9, 9, 9, 9}, {8, 8, 3, 8}, {1, 2, 3, 4}};
+    const auto layout = bsel::place_blocks_in_memory(
+        blocks, model, {100, 4, 16, true, bsel::MccPlacementMode::AlignedRecords});
+    check(layout.entries.size() == 3, "MCC creates one physical entry per logical block");
+    check(layout.entries[0].physical_address == 100 &&
+              layout.entries[0].metadata_region == 0 &&
+              layout.entries[0].stored_bytes == 2 && layout.entries[0].compressed,
+          "MCC stores the first compressed block at the base address");
+    check(layout.entries[1].physical_address == 104 && layout.entries[1].stored_bytes == 3 &&
+              layout.entries[1].compressed,
+          "MCC aligns the next compressed block before placement");
+    check(layout.entries[2].physical_address == 108 && layout.entries[2].stored_bytes == 4 &&
+              !layout.entries[2].compressed,
+          "MCC stores raw fallback blocks in their original size");
+    check(layout.stats.original_bytes == 12 && layout.stats.stored_bytes == 9 &&
+              layout.stats.padding_bytes == 3 && layout.stats.physical_bytes == 12 &&
+              layout.stats.metadata_regions == 1 && layout.stats.compressed_blocks == 2,
+          "MCC reports logical, stored, and physical address-space usage");
+    check(layout.stats.quantized_compression_ratio() == 1.0,
+          "MCC quantized ratio includes address padding");
+    check(layout.stats.storage_ratio() == layout.stats.quantized_compression_ratio(),
+          "MCC storage ratio remains a compatibility alias");
+    check_throws([&] { bsel::place_blocks_in_memory(blocks, model, {0, 0, 16}); },
+                 "MCC rejects zero alignment");
+    check_throws([&] { bsel::place_blocks_in_memory(blocks, model, {0, 4, 0}); },
+                 "MCC rejects zero metadata granularity");
+
+    const std::vector<bsel::Block> repeated_uniform{{9, 9, 9, 9}, {7, 7, 7, 7},
+                                                    {5, 5, 5, 5}};
+    const auto packed = bsel::place_blocks_in_memory(
+        repeated_uniform, model,
+        {100, 4, 16, true, bsel::MccPlacementMode::AlignedRecords});
+    check(packed.entries[0].physical_address == 100 &&
+              packed.entries[1].physical_address == 102 &&
+              packed.entries[2].physical_address == 104,
+          "MCC fills earlier alignment padding before appending");
+    check(packed.stats.stored_bytes == 6 && packed.stats.padding_bytes == 2 &&
+              packed.stats.physical_bytes == 8,
+          "MCC padding reuse charges the final aligned physical segment");
+
+    const std::vector<std::size_t> small_records{2, 2, 2, 2, 2};
+    const auto segments = bsel::place_stored_blocks_in_memory(
+        small_records, 4, {100, 4, 16, true, bsel::MccPlacementMode::SegmentPackingV1});
+    check(segments.entries[0].physical_address == 100 &&
+              segments.entries[1].physical_address == 102 &&
+              segments.entries[1].segment_offset == 2 &&
+              segments.entries[2].physical_address == 104,
+          "MCC segment packing stores multiple compressed records in one aligned segment");
+    check(segments.stats.stored_bytes == 10 && segments.stats.physical_bytes == 12 &&
+              segments.stats.padding_bytes == 2,
+          "MCC segment packing charges only occupied aligned segments");
+
+    const std::vector<std::size_t> ffd_records{8, 8, 12, 40, 40};
+    const auto v1 = bsel::place_stored_blocks_in_memory(
+        ffd_records, 64, {0, 64, 4096, true, bsel::MccPlacementMode::SegmentPackingV1});
+    const auto v2 = bsel::place_stored_blocks_in_memory(
+        ffd_records, 64, {0, 64, 4096, true, bsel::MccPlacementMode::RegionFfdV2});
+    check(v1.stats.physical_bytes == 192 && v2.stats.physical_bytes == 128,
+          "MCC v2 region FFD repacks a metadata region more tightly than v1");
+
+    const std::vector<std::size_t> tail_records{90, 90, 90, 90};
+    const auto tail_v2 = bsel::place_stored_blocks_in_memory(
+        tail_records, 256, {0, 64, 4096, true, bsel::MccPlacementMode::RegionFfdV2});
+    const auto tail_v3 = bsel::place_stored_blocks_in_memory(
+        tail_records, 256, {0, 64, 4096, true, bsel::MccPlacementMode::TailSplitV3});
+    check(tail_v2.stats.physical_bytes == 512 && tail_v3.stats.physical_bytes == 384,
+          "MCC v3 packs split tails from multi-segment records");
+}
+
 void test_rtl_generation() {
     const bsel::Model model{4, {{3, 1, {pattern({0, 0, 1, 0})}}}};
     const auto compressor = bsel::generate_compressor_sv(model, 0);
@@ -500,6 +600,7 @@ int main() {
     test_128_byte_blocks();
     test_phase_stats_and_validation();
     test_model_io();
+    test_mcc_layout();
     test_rtl_generation();
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

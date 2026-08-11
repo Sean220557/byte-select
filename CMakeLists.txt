@@ -9,6 +9,7 @@ add_library(byte_select
     src/pattern.cpp
     src/trainer.cpp
     src/codec.cpp
+    src/mcc.cpp
     src/baseline.cpp
     src/paper_config.cpp
     src/model_io.cpp
@@ -82,6 +83,17 @@ set_tests_properties(
                PASS_REGULAR_EXPRESSION "trace_mean count=2"
 )
 add_test(
+    NAME byte_select_mcc
+    COMMAND bsel mcc "${BSEL_TRAIN_LIST_MODEL}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/trace-a.bin"
+            --base 4096 --alignment 4 --limit 2
+)
+set_tests_properties(
+    byte_select_mcc
+    PROPERTIES DEPENDS byte_select_train_list
+               PASS_REGULAR_EXPRESSION "mcc blocks=.*padding_bytes=.*physical_bytes=.*metadata_regions=.*quantized_ratio=.*mcc_entry logical_block=0 physical_address=4096.*metadata_region=0"
+)
+add_test(
     NAME byte_select_evaluate_groups
     COMMAND bsel evaluate-groups "${BSEL_TRAIN_LIST_MODEL}"
             --group alpha "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/trace-a.bin"
@@ -130,6 +142,17 @@ add_test(
             --baseline cpack --baseline bpc --baseline huffman
 )
 set_tests_properties(byte_select_compare PROPERTIES DEPENDS byte_select_compare_train)
+add_test(
+    NAME byte_select_mcc_compare
+    COMMAND bsel mcc-compare "${BSEL_COMPARE_MODEL}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/codec.cpp"
+            --base 4096 --alignment 8
+)
+set_tests_properties(
+    byte_select_mcc_compare
+    PROPERTIES DEPENDS byte_select_compare_train
+               PASS_REGULAR_EXPRESSION "mcc_compare algorithm=bsel.*after_quantized_ratio="
+)
 add_test(
     NAME byte_select_compare_groups
     COMMAND bsel compare-groups "${BSEL_COMPARE_MODEL}"

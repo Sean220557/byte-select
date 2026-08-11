@@ -171,8 +171,61 @@ baseline options. Its `*_mean_of_group_means` rows are the relevant summary
 when comparing separately averaged benchmark sets; its `*_group_block_weighted`
 rows instead weight every full cache line equally.
 
+## Basic MCC Address Placement
+
+`mcc` models the first memory-controller-side responsibility for a compressed
+memory/cache path: assigning each logical subline to a concrete physical
+storage address. The intended MCC scenario uses 256-byte sublines, aligns each
+new physical placement to 64-byte boundaries, and groups address metadata in
+4KiB regions. It reuses the trained Byte-Select model, compresses each full
+input block, and places the resulting record in a physical byte address space.
+Compressed blocks consume their real encoded byte count (`metadata + dictionary`);
+uncompressed fallback blocks consume the original block size. When later records
+arrive, MCC placement is versioned. `segment-v1` is the online 64B segment
+packing policy: records smaller than 64B are placed into the first partially
+used segment that fits. `region-ffd-v2` is the default policy: within each 4KiB
+metadata-management window, records are sorted by compressed size and packed
+with first-fit decreasing into 64B physical segments. Use `--placement aligned`
+to reproduce the older per-record aligned placement. `tail-split-v3` further
+splits records larger than 64B into full 64B segments plus a packable tail; this
+models an optimistic controller that can place a record's final partial segment
+with other tails.
+
+```powershell
+.\build\bsel.exe train test.trace bsel.model --block-size 256 --target 128:256:1
+.\build\bsel.exe mcc bsel.model test.trace --base 4096 --limit 16
+```
+
+Use `mcc-compare` to run Byte-Select and all software baselines through the
+same MCC address-placement model, reporting the quantized ratio before MCC
+packing, after `segment-v1`, after `region-ffd-v2`, and after `tail-split-v3`:
+
+```powershell
+.\build\bsel.exe mcc-compare bsel.model test.trace
+```
+
+The summary reports logical input bytes, stored bytes, padding bytes introduced
+by 64-byte physical-address segments, physical address-space bytes, the number
+of 4KiB metadata regions, and the resulting `quantized_ratio`. This MCC
+quantized ratio is the real compressed-memory address-placement ratio:
+`original_bytes / physical_bytes`, so alignment zero-fill is charged. Each
+`mcc_entry` line maps a `logical_block` to its `physical_address`,
+`metadata_region`, stored size, compression flag, selected pattern set, and
+encoded metadata. Use `--alignment` or `--metadata-granularity` only when
+testing a non-default controller geometry.
+
 The FPC encoder uses packed 3-bit-per-word tags and a zero-payload zero prefix,
-so an all-zero 64-byte line occupies 6B as stated in this paper. The BDI
+so an all-zero 64-byte line occupies 6B as stated in this paper. `fpc-top256`
+is a trained FPC residual-dictionary variant used by MCC comparison: it keeps
+the 256 most common FPC pattern-7 residual blocks and charges a one-byte index
+when a residual block hits, otherwise falling back to the ordinary residual
+payload. `fpc-resword256` is a finer-grained variant: it keeps the 256 most
+common 32-bit residual words and charges a one-bit hit flag plus an 8-bit index
+on hits, or the raw 32-bit word on misses. `fpc-resword64` is the
+hardware-lean version with a 64-entry residual-word table, a 6-bit index, and a
+256-byte dictionary instead of the 1KiB table needed by the 256-entry variant.
+These dictionary stores are treated like the other trained models and are not
+charged per trace. The BDI
 estimator follows the Table-2 `Base8/4/2-Delta` sizes and tests whether one
 base has a feasible signed-delta range. The C-Pack estimator follows the
 authors' 16-entry (64B) FIFO dictionary with the `zzzz`/`xxxx`/`mmmm`/`mmxx`/

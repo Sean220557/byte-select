@@ -1,6 +1,7 @@
 #include "byte_select/baseline.hpp"
 #include "byte_select/codec.hpp"
 #include "byte_select/model_io.hpp"
+#include "byte_select/mcc.hpp"
 #include "byte_select/paper_config.hpp"
 #include "byte_select/rtl.hpp"
 #include "byte_select/trainer.hpp"
@@ -1257,6 +1258,305 @@ void command_patterns(int argc, char** argv) {
     }
 }
 
+void command_mcc(int argc, char** argv) {
+    if (argc < 4) {
+        throw std::runtime_error("usage: bsel mcc MODEL INPUT [--base N] [--alignment N] [--metadata-granularity N] [--placement aligned|segment-v1|region-ffd-v2|tail-split-v3] [--limit N] [--no-fill-padding]");
+    }
+    bsel::MccConfig config;
+    std::size_t limit = std::numeric_limits<std::size_t>::max();
+    for (int i = 4; i < argc; ++i) {
+        const std::string option = argv[i];
+        if (option == "--base" && i + 1 < argc) {
+            config.base_address = parse_size(argv[++i], "base address");
+        } else if (option == "--alignment" && i + 1 < argc) {
+            config.alignment = parse_size(argv[++i], "alignment");
+        } else if (option == "--metadata-granularity" && i + 1 < argc) {
+            config.metadata_granularity = parse_size(argv[++i], "metadata granularity");
+        } else if (option == "--placement" && i + 1 < argc) {
+            const std::string mode = argv[++i];
+            if (mode == "aligned") {
+                config.placement_mode = bsel::MccPlacementMode::AlignedRecords;
+            } else if (mode == "segment" || mode == "segment-v1") {
+                config.placement_mode = bsel::MccPlacementMode::SegmentPackingV1;
+            } else if (mode == "region-ffd-v2" || mode == "v2") {
+                config.placement_mode = bsel::MccPlacementMode::RegionFfdV2;
+            } else if (mode == "tail-split-v3" || mode == "v3") {
+                config.placement_mode = bsel::MccPlacementMode::TailSplitV3;
+            } else {
+                throw std::runtime_error("MCC placement must be aligned, segment-v1, region-ffd-v2, or tail-split-v3");
+            }
+        } else if (option == "--limit" && i + 1 < argc) {
+            limit = parse_size(argv[++i], "limit");
+        } else if (option == "--no-fill-padding") {
+            config.fill_padding = false;
+        } else {
+            throw std::runtime_error("unknown or incomplete option: " + option);
+        }
+    }
+
+    const auto model = bsel::load_model(argv[2]);
+    const auto blocks = split_blocks(read_bytes(argv[3]), model.block_size, false);
+    if (blocks.empty()) {
+        throw std::runtime_error("MCC input contains no full blocks");
+    }
+    const auto layout = bsel::place_blocks_in_memory(blocks, model, config);
+    std::cout << "mcc blocks=" << layout.stats.blocks
+              << " compressed_blocks=" << layout.stats.compressed_blocks
+              << " compressed_fraction=" << std::fixed << std::setprecision(6)
+              << layout.stats.compressed_fraction()
+              << " original_bytes=" << layout.stats.original_bytes
+              << " stored_bytes=" << layout.stats.stored_bytes
+              << " padding_bytes=" << layout.stats.padding_bytes
+              << " physical_bytes=" << layout.stats.physical_bytes
+              << " metadata_regions=" << layout.stats.metadata_regions
+              << " quantized_ratio=" << layout.stats.quantized_compression_ratio() << '\n';
+    const auto count = std::min(limit, layout.entries.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto& entry = layout.entries[i];
+        std::cout << "mcc_entry logical_block=" << entry.logical_block
+                  << " physical_address=" << entry.physical_address
+                  << " metadata_region=" << entry.metadata_region
+                  << " segment_offset=" << entry.segment_offset
+                  << " stored_bytes=" << entry.stored_bytes
+                  << " compressed=" << (entry.compressed ? 1 : 0)
+                  << " set_index=" << entry.set_index
+                  << " metadata=" << entry.metadata << '\n';
+    }
+}
+
+std::vector<std::size_t> baseline_stored_sizes(const std::vector<Block>& blocks,
+                                               bsel::BaselineKind kind) {
+    std::vector<std::size_t> sizes;
+    sizes.reserve(blocks.size());
+    for (const auto& block : blocks) {
+        sizes.push_back(bsel::baseline_encoded_size(block, kind));
+    }
+    return sizes;
+}
+
+std::vector<std::size_t> fpc_top256_stored_sizes(const std::vector<Block>& blocks,
+                                                 const bsel::FpcTop256Model& model) {
+    std::vector<std::size_t> sizes;
+    sizes.reserve(blocks.size());
+    for (const auto& block : blocks) {
+        sizes.push_back(bsel::fpc_top256_encoded_size(block, model));
+    }
+    return sizes;
+}
+
+std::vector<std::size_t> fpc_residual_word256_stored_sizes(
+    const std::vector<Block>& blocks, const bsel::FpcResidualWord256Model& model) {
+    std::vector<std::size_t> sizes;
+    sizes.reserve(blocks.size());
+    for (const auto& block : blocks) {
+        sizes.push_back(bsel::fpc_residual_word256_encoded_size(block, model));
+    }
+    return sizes;
+}
+
+std::vector<std::size_t> read_size_list(const std::string& path) {
+    std::ifstream input(path);
+    if (!input) {
+        throw std::runtime_error("cannot open size list: " + path);
+    }
+    std::vector<std::size_t> sizes;
+    std::string token;
+    while (input >> token) {
+        sizes.push_back(parse_size(token, "stored size"));
+    }
+    return sizes;
+}
+
+void print_mcc_layout_summary(const std::string& label, const bsel::MccLayout& layout) {
+    std::cout << label << " blocks=" << layout.stats.blocks
+              << " compressed_blocks=" << layout.stats.compressed_blocks
+              << " compressed_fraction=" << std::fixed << std::setprecision(6)
+              << layout.stats.compressed_fraction()
+              << " original_bytes=" << layout.stats.original_bytes
+              << " stored_bytes=" << layout.stats.stored_bytes
+              << " padding_bytes=" << layout.stats.padding_bytes
+              << " physical_bytes=" << layout.stats.physical_bytes
+              << " metadata_regions=" << layout.stats.metadata_regions
+              << " quantized_ratio=" << layout.stats.quantized_compression_ratio() << '\n';
+}
+
+void command_mcc_sizes(int argc, char** argv) {
+    if (argc < 4) {
+        throw std::runtime_error("usage: bsel mcc-sizes SIZE_LIST BLOCK_SIZE [--base N] [--alignment N] [--metadata-granularity N]");
+    }
+    const auto sizes = read_size_list(argv[2]);
+    const auto block_size = parse_size(argv[3], "block size");
+    bsel::MccConfig config;
+    for (int i = 4; i < argc; ++i) {
+        const std::string option = argv[i];
+        if (option == "--base" && i + 1 < argc) {
+            config.base_address = parse_size(argv[++i], "base address");
+        } else if (option == "--alignment" && i + 1 < argc) {
+            config.alignment = parse_size(argv[++i], "alignment");
+        } else if (option == "--metadata-granularity" && i + 1 < argc) {
+            config.metadata_granularity = parse_size(argv[++i], "metadata granularity");
+        } else {
+            throw std::runtime_error("unknown or incomplete option: " + option);
+        }
+    }
+    auto before_config = config;
+    before_config.fill_padding = false;
+    before_config.placement_mode = bsel::MccPlacementMode::AlignedRecords;
+    auto v1_config = config;
+    v1_config.placement_mode = bsel::MccPlacementMode::SegmentPackingV1;
+    auto v2_config = config;
+    v2_config.placement_mode = bsel::MccPlacementMode::RegionFfdV2;
+    auto v3_config = config;
+    v3_config.placement_mode = bsel::MccPlacementMode::TailSplitV3;
+    print_mcc_layout_summary(
+        "mcc_sizes_before",
+        bsel::place_stored_blocks_in_memory(sizes, block_size, before_config));
+    print_mcc_layout_summary(
+        "mcc_sizes_v1",
+        bsel::place_stored_blocks_in_memory(sizes, block_size, v1_config));
+    print_mcc_layout_summary(
+        "mcc_sizes_v2",
+        bsel::place_stored_blocks_in_memory(sizes, block_size, v2_config));
+    print_mcc_layout_summary(
+        "mcc_sizes_v3",
+        bsel::place_stored_blocks_in_memory(sizes, block_size, v3_config));
+}
+
+void print_mcc_comparison_row(const std::string& algorithm,
+                              const bsel::MccLayout& before,
+                              const bsel::MccLayout& after) {
+    const auto before_ratio = before.stats.quantized_compression_ratio();
+    const auto after_ratio = after.stats.quantized_compression_ratio();
+    std::cout << "mcc_compare algorithm=" << algorithm
+              << " before_quantized_ratio=" << before_ratio
+              << " after_quantized_ratio=" << after_ratio
+              << " delta=" << after_ratio - before_ratio
+              << " before_physical_bytes=" << before.stats.physical_bytes
+              << " after_physical_bytes=" << after.stats.physical_bytes
+              << " before_metadata_regions=" << before.stats.metadata_regions
+              << " after_metadata_regions=" << after.stats.metadata_regions
+              << " saved_physical_bytes="
+              << static_cast<std::int64_t>(before.stats.physical_bytes) -
+                     static_cast<std::int64_t>(after.stats.physical_bytes)
+              << " before_padding_bytes=" << before.stats.padding_bytes
+              << " after_padding_bytes=" << after.stats.padding_bytes << '\n';
+}
+
+void command_mcc_compare(int argc, char** argv) {
+    if (argc < 4) {
+        throw std::runtime_error("usage: bsel mcc-compare MODEL INPUT [--base N] [--alignment N] [--metadata-granularity N]");
+    }
+    bsel::MccConfig config;
+    for (int i = 4; i < argc; ++i) {
+        const std::string option = argv[i];
+        if (option == "--base" && i + 1 < argc) {
+            config.base_address = parse_size(argv[++i], "base address");
+        } else if (option == "--alignment" && i + 1 < argc) {
+            config.alignment = parse_size(argv[++i], "alignment");
+        } else if (option == "--metadata-granularity" && i + 1 < argc) {
+            config.metadata_granularity = parse_size(argv[++i], "metadata granularity");
+        } else {
+            throw std::runtime_error("unknown or incomplete option: " + option);
+        }
+    }
+
+    const auto model = bsel::load_model(argv[2]);
+    const auto blocks = split_blocks(read_bytes(argv[3]), model.block_size, false);
+    if (blocks.empty()) {
+        throw std::runtime_error("MCC comparison input contains no full blocks");
+    }
+    auto before_config = config;
+    before_config.fill_padding = false;
+    before_config.placement_mode = bsel::MccPlacementMode::AlignedRecords;
+    auto v1_config = config;
+    v1_config.fill_padding = true;
+    v1_config.placement_mode = bsel::MccPlacementMode::SegmentPackingV1;
+    auto v2_config = config;
+    v2_config.fill_padding = true;
+    v2_config.placement_mode = bsel::MccPlacementMode::RegionFfdV2;
+    auto v3_config = config;
+    v3_config.fill_padding = true;
+    v3_config.placement_mode = bsel::MccPlacementMode::TailSplitV3;
+
+    print_mcc_comparison_row("bsel",
+                             bsel::place_blocks_in_memory(blocks, model, before_config),
+                             bsel::place_blocks_in_memory(blocks, model, v1_config));
+    print_mcc_comparison_row("bsel_v2",
+                             bsel::place_blocks_in_memory(blocks, model, before_config),
+                             bsel::place_blocks_in_memory(blocks, model, v2_config));
+    print_mcc_comparison_row("bsel_v3",
+                             bsel::place_blocks_in_memory(blocks, model, before_config),
+                             bsel::place_blocks_in_memory(blocks, model, v3_config));
+    const std::vector<bsel::BaselineKind> baselines{
+        bsel::BaselineKind::Fpc, bsel::BaselineKind::Bdi,
+        bsel::BaselineKind::HybridBdiFpc, bsel::BaselineKind::Cpack,
+        bsel::BaselineKind::Bpc, bsel::BaselineKind::Huffman};
+    for (const auto kind : baselines) {
+        try {
+            const auto sizes = baseline_stored_sizes(blocks, kind);
+            print_mcc_comparison_row(
+                bsel::baseline_kind_name(kind),
+                bsel::place_stored_blocks_in_memory(sizes, model.block_size, before_config),
+                bsel::place_stored_blocks_in_memory(sizes, model.block_size, v1_config));
+            print_mcc_comparison_row(
+                std::string(bsel::baseline_kind_name(kind)) + "_v2",
+                bsel::place_stored_blocks_in_memory(sizes, model.block_size, before_config),
+                bsel::place_stored_blocks_in_memory(sizes, model.block_size, v2_config));
+            print_mcc_comparison_row(
+                std::string(bsel::baseline_kind_name(kind)) + "_v3",
+                bsel::place_stored_blocks_in_memory(sizes, model.block_size, before_config),
+                bsel::place_stored_blocks_in_memory(sizes, model.block_size, v3_config));
+        } catch (const std::exception& error) {
+            std::cout << "mcc_compare algorithm=" << bsel::baseline_kind_name(kind)
+                      << " status=unsupported reason=\"" << error.what() << "\"\n";
+        }
+    }
+    const auto top256 = bsel::train_fpc_top256(blocks);
+    const auto top256_sizes = fpc_top256_stored_sizes(blocks, top256);
+    print_mcc_comparison_row(
+        "fpc-top256",
+        bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, v1_config));
+    print_mcc_comparison_row(
+        "fpc-top256_v2",
+        bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, v2_config));
+    print_mcc_comparison_row(
+        "fpc-top256_v3",
+        bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, v3_config));
+
+    const auto word256 = bsel::train_fpc_residual_word256(blocks);
+    const auto word256_sizes = fpc_residual_word256_stored_sizes(blocks, word256);
+    print_mcc_comparison_row(
+        "fpc-resword256",
+        bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, v1_config));
+    print_mcc_comparison_row(
+        "fpc-resword256_v2",
+        bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, v2_config));
+    print_mcc_comparison_row(
+        "fpc-resword256_v3",
+        bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, v3_config));
+
+    const auto word64 = bsel::train_fpc_residual_word_dict(blocks, 64);
+    const auto word64_sizes = fpc_residual_word256_stored_sizes(blocks, word64);
+    print_mcc_comparison_row(
+        "fpc-resword64",
+        bsel::place_stored_blocks_in_memory(word64_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(word64_sizes, model.block_size, v1_config));
+    print_mcc_comparison_row(
+        "fpc-resword64_v2",
+        bsel::place_stored_blocks_in_memory(word64_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(word64_sizes, model.block_size, v2_config));
+    print_mcc_comparison_row(
+        "fpc-resword64_v3",
+        bsel::place_stored_blocks_in_memory(word64_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(word64_sizes, model.block_size, v3_config));
+}
+
 void command_generate_rtl(int argc, char** argv) {
     if (argc != 4) {
         throw std::runtime_error("usage: bsel generate-rtl MODEL OUTPUT_DIRECTORY");
@@ -1290,6 +1590,13 @@ void print_usage() {
         << "  bsel compress MODEL INPUT OUTPUT\n"
         << "  bsel decompress MODEL INPUT OUTPUT\n"
         << "  bsel patterns MODEL [--limit N]\n"
+        << "  bsel mcc MODEL INPUT [--base N] [--alignment N] [--metadata-granularity N]\n"
+        << "           [--placement aligned|segment-v1|region-ffd-v2|tail-split-v3]\n"
+        << "           [--limit N] [--no-fill-padding]\n"
+        << "  bsel mcc-compare MODEL INPUT [--base N] [--alignment N]\n"
+        << "                   [--metadata-granularity N]\n"
+        << "  bsel mcc-sizes SIZE_LIST BLOCK_SIZE [--base N] [--alignment N]\n"
+        << "                 [--metadata-granularity N]\n"
         << "  bsel generate-rtl MODEL OUTPUT_DIRECTORY\n";
 }
 
@@ -1330,6 +1637,12 @@ int main(int argc, char** argv) {
             command_decompress(argc, argv);
         } else if (command == "patterns") {
             command_patterns(argc, argv);
+        } else if (command == "mcc") {
+            command_mcc(argc, argv);
+        } else if (command == "mcc-compare") {
+            command_mcc_compare(argc, argv);
+        } else if (command == "mcc-sizes") {
+            command_mcc_sizes(argc, argv);
         } else if (command == "generate-rtl") {
             command_generate_rtl(argc, argv);
         } else {

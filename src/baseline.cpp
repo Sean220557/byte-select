@@ -5,6 +5,7 @@
 #include <functional>
 #include <queue>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 namespace bsel {
@@ -106,6 +107,32 @@ unsigned popcount(std::uint32_t value) {
         value >>= 1U;
     }
     return count;
+}
+
+Block bit_shuffle_words32(const Block& block) {
+    if (block.empty() || block.size() % 4 != 0) {
+        throw std::invalid_argument("bit shuffle requires 32-bit words");
+    }
+    Block shuffled;
+    shuffled.reserve(block.size());
+    const auto words = block.size() / 4;
+    for (std::size_t chunk_begin = 0; chunk_begin < words; chunk_begin += 32) {
+        const auto chunk_words = std::min<std::size_t>(32, words - chunk_begin);
+        std::array<std::uint32_t, 32> planes{};
+        for (std::size_t word = 0; word < chunk_words; ++word) {
+            const auto value = static_cast<std::uint32_t>(
+                load_little_endian(block, (chunk_begin + word) * 4, 4));
+            for (unsigned bit = 0; bit < 32; ++bit) {
+                planes[bit] |= ((value >> bit) & 1U) << word;
+            }
+        }
+        for (const auto plane : planes) {
+            for (unsigned byte = 0; byte < 4; ++byte) {
+                shuffled.push_back(static_cast<std::uint8_t>(plane >> (8U * byte)));
+            }
+        }
+    }
+    return shuffled;
 }
 
 class BitWriter {
@@ -342,6 +369,66 @@ std::vector<std::uint8_t> fpc_encode(const Block& block) {
     return writer.bytes();
 }
 
+struct FpcResidualParts {
+    std::vector<std::uint8_t> tags;
+    Block residual_block;
+    std::size_t regular_payload_bits = 0;
+    std::size_t raw_residual_bytes = 0;
+};
+
+std::uint8_t fpc_tag_for(std::uint32_t value) {
+    if (value == 0) return std::uint8_t{0};
+    if (is_sign_extended(value, 4)) return std::uint8_t{1};
+    const auto byte = static_cast<std::uint8_t>(value);
+    if (((value >> 8U) & 0xffU) == byte &&
+        ((value >> 16U) & 0xffU) == byte &&
+        ((value >> 24U) & 0xffU) == byte) return std::uint8_t{2};
+    if (is_sign_extended(value, 8)) return std::uint8_t{3};
+    if (is_sign_extended(value, 16)) return std::uint8_t{4};
+    if ((value & 0xffffU) == 0) return std::uint8_t{5};
+    if (halfword_is_sign_extended_byte(static_cast<std::uint16_t>(value)) &&
+        halfword_is_sign_extended_byte(static_cast<std::uint16_t>(value >> 16U)))
+        return std::uint8_t{6};
+    return std::uint8_t{7};
+}
+
+unsigned fpc_payload_bits_for_tag(std::uint8_t tag) {
+    switch (tag) {
+        case 0: return 0;
+        case 1: return 4;
+        case 2:
+        case 3: return 8;
+        case 4:
+        case 5:
+        case 6: return 16;
+        case 7: return 0;
+        default: throw std::runtime_error("invalid FPC tag");
+    }
+}
+
+FpcResidualParts split_fpc_residual(const Block& block) {
+    if (block.empty() || block.size() % 4 != 0) {
+        throw std::invalid_argument("FPC Top-256 requires a non-empty block divisible by four bytes");
+    }
+    FpcResidualParts parts;
+    parts.tags.reserve(block.size() / 4);
+    parts.residual_block.assign(block.size(), 0);
+    for (std::size_t offset = 0; offset < block.size(); offset += 4) {
+        const auto value = static_cast<std::uint32_t>(load_little_endian(block, offset, 4));
+        const auto tag = fpc_tag_for(value);
+        parts.tags.push_back(tag);
+        if (tag == 7) {
+            for (std::size_t i = 0; i < 4; ++i) {
+                parts.residual_block[offset + i] = block[offset + i];
+            }
+            parts.raw_residual_bytes += 4;
+        } else {
+            parts.regular_payload_bits += fpc_payload_bits_for_tag(tag);
+        }
+    }
+    return parts;
+}
+
 Block fpc_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size) {
     if (output_size == 0 || output_size % 4 != 0) {
         throw std::invalid_argument("FPC output size must be divisible by four bytes");
@@ -384,7 +471,102 @@ Block fpc_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_si
 }
 
 std::size_t fpc_encoded_size(const Block& block) {
-    return std::min(fpc_encode(block).size(), block.size());
+    const auto direct = fpc_encode(block).size();
+    const auto shuffled = fpc_encode(bit_shuffle_words32(block)).size();
+    return std::min({direct, shuffled, block.size()});
+}
+
+FpcTop256Model train_fpc_top256(const std::vector<Block>& blocks) {
+    std::unordered_map<Block, std::uint64_t, FpcTop256Model::BlockHash> counts;
+    for (const auto& block : blocks) {
+        ++counts[split_fpc_residual(block).residual_block];
+    }
+    std::vector<std::pair<Block, std::uint64_t>> ranked(counts.begin(), counts.end());
+    std::sort(ranked.begin(), ranked.end(), [](const auto& left, const auto& right) {
+        if (left.second != right.second) {
+            return left.second > right.second;
+        }
+        return left.first < right.first;
+    });
+    FpcTop256Model model;
+    const auto keep = std::min<std::size_t>(256, ranked.size());
+    for (std::size_t i = 0; i < keep; ++i) {
+        model.residuals.insert(std::move(ranked[i].first));
+    }
+    return model;
+}
+
+std::size_t fpc_top256_encoded_size(const Block& block, const FpcTop256Model& model) {
+    const auto parts = split_fpc_residual(block);
+    const auto tag_bits = parts.tags.size() * 3U;
+    const auto residual_bytes =
+        model.residuals.find(parts.residual_block) == model.residuals.end()
+            ? parts.raw_residual_bytes
+            : std::size_t{1};
+    const auto bits = tag_bits + parts.regular_payload_bits + residual_bytes * 8U;
+    return std::min(rounded_up_bytes(bits), block.size());
+}
+
+FpcResidualWord256Model train_fpc_residual_word_dict(
+    const std::vector<Block>& blocks, std::size_t max_words) {
+    if (max_words == 0 || max_words > 256) {
+        throw std::invalid_argument("FPC residual-word dictionary size must be 1..256");
+    }
+    std::unordered_map<std::uint32_t, std::uint64_t> counts;
+    for (const auto& block : blocks) {
+        const auto parts = split_fpc_residual(block);
+        for (std::size_t offset = 0; offset < block.size(); offset += 4) {
+            if (parts.residual_block[offset] == 0 &&
+                parts.residual_block[offset + 1] == 0 &&
+                parts.residual_block[offset + 2] == 0 &&
+                parts.residual_block[offset + 3] == 0) {
+                continue;
+            }
+            ++counts[static_cast<std::uint32_t>(
+                load_little_endian(parts.residual_block, offset, 4))];
+        }
+    }
+    std::vector<std::pair<std::uint32_t, std::uint64_t>> ranked(
+        counts.begin(), counts.end());
+    std::sort(ranked.begin(), ranked.end(), [](const auto& left, const auto& right) {
+        if (left.second != right.second) {
+            return left.second > right.second;
+        }
+        return left.first < right.first;
+    });
+    FpcResidualWord256Model model;
+    model.index_bits = std::max(1U, ceil_log2(max_words));
+    const auto keep = std::min(max_words, ranked.size());
+    for (std::size_t i = 0; i < keep; ++i) {
+        model.words.insert(ranked[i].first);
+    }
+    return model;
+}
+
+FpcResidualWord256Model train_fpc_residual_word256(const std::vector<Block>& blocks) {
+    return train_fpc_residual_word_dict(blocks, 256);
+}
+
+std::size_t fpc_residual_word256_encoded_size(
+    const Block& block, const FpcResidualWord256Model& model) {
+    const auto parts = split_fpc_residual(block);
+    std::size_t residual_words = 0;
+    std::size_t residual_payload_bits = 0;
+    for (std::size_t offset = 0; offset < block.size(); offset += 4) {
+        const auto value = static_cast<std::uint32_t>(
+            load_little_endian(parts.residual_block, offset, 4));
+        if (value == 0) {
+            continue;
+        }
+        ++residual_words;
+        residual_payload_bits +=
+            model.words.find(value) == model.words.end() ? 32U : model.index_bits;
+    }
+    const auto tag_bits = parts.tags.size() * 3U;
+    const auto hitmap_bits = residual_words;
+    const auto bits = tag_bits + parts.regular_payload_bits + hitmap_bits +
+                      residual_payload_bits;
+    return std::min(rounded_up_bytes(bits), block.size());
 }
 
 std::vector<std::uint8_t> bdi_encode(const Block& block) {
@@ -862,7 +1044,24 @@ Block bpc_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_si
 }
 
 std::size_t bpc_encoded_size(const Block& block) {
-    return std::min(bpc_encode(block).size(), block.size());
+    if (block.size() < 8 || block.size() % 4 != 0) {
+        throw std::invalid_argument("BPC requires 32-bit symbols");
+    }
+    if (block.size() <= 128) {
+        return std::min(bpc_encode(block).size(), block.size());
+    }
+    std::size_t total = 0;
+    for (std::size_t offset = 0; offset < block.size(); offset += 128) {
+        const auto chunk_size = std::min<std::size_t>(128, block.size() - offset);
+        if (chunk_size < 8) {
+            total += chunk_size;
+            continue;
+        }
+        Block chunk(block.begin() + static_cast<std::ptrdiff_t>(offset),
+                    block.begin() + static_cast<std::ptrdiff_t>(offset + chunk_size));
+        total += std::min(bpc_encode(chunk).size(), chunk.size());
+    }
+    return std::min(total, block.size());
 }
 
 std::vector<std::uint8_t> huffman_encode(const Block& block) {
