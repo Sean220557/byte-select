@@ -144,7 +144,7 @@ int main(int argc, char** argv) try {
         const auto input = read_file(argv[3]);
         const auto blocks = blocks_from(input);
         std::uint64_t physical_bytes = 0, encoded_bytes = 0;
-        std::uint64_t raw = 0, fpc = 0, combined = 0, prefix = 0, residual = 0;
+        std::uint64_t raw = 0, fpc = 0, bitshuffle = 0, combined = 0, prefix = 0, residual = 0;
         for (const auto& block : blocks) {
             const auto encoded = fpc_bsel::encode_block(block, model);
             physical_bytes += encoded.bytes.size();
@@ -154,6 +154,7 @@ int main(int argc, char** argv) try {
             encoded_bytes += encoded.bytes.size() - 1;
             if (encoded.mode == fpc_bsel::BlockMode::Raw) ++raw;
             else if (encoded.mode == fpc_bsel::BlockMode::Fpc) ++fpc;
+            else if (encoded.mode == fpc_bsel::BlockMode::FpcBitshuffle) ++bitshuffle;
             else { ++combined; prefix += encoded.prefix_bsel; residual += encoded.residual_bsel; }
             if (command == "roundtrip" && fpc_bsel::decode_block(encoded.bytes, model) != block)
                 throw std::runtime_error("round-trip mismatch");
@@ -163,6 +164,7 @@ int main(int argc, char** argv) try {
                   << " physical_encoded_bytes=" << physical_bytes << std::fixed << std::setprecision(4)
                   << " ratio=" << static_cast<double>(input.size()) / encoded_bytes
                   << " raw_blocks=" << raw << " fpc_blocks=" << fpc
+                  << " bitshuffle_fpc_blocks=" << bitshuffle
                   << " fpc_bsel_blocks=" << combined << " prefix_bsel_blocks=" << prefix
                   << " residual_bsel_blocks=" << residual << '\n';
         return 0;

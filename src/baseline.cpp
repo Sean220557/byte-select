@@ -504,7 +504,7 @@ std::size_t fpc_top256_encoded_size(const Block& block, const FpcTop256Model& mo
             ? parts.raw_residual_bytes
             : std::size_t{1};
     const auto bits = tag_bits + parts.regular_payload_bits + residual_bytes * 8U;
-    return std::min(rounded_up_bytes(bits), block.size());
+    return std::min(rounded_up_bytes(bits), fpc_encoded_size(block));
 }
 
 FpcResidualWord256Model train_fpc_residual_word_dict(
@@ -566,7 +566,7 @@ std::size_t fpc_residual_word256_encoded_size(
     const auto hitmap_bits = residual_words;
     const auto bits = tag_bits + parts.regular_payload_bits + hitmap_bits +
                       residual_payload_bits;
-    return std::min(rounded_up_bytes(bits), block.size());
+    return std::min(rounded_up_bytes(bits), fpc_encoded_size(block));
 }
 
 std::vector<std::uint8_t> bdi_encode(const Block& block) {

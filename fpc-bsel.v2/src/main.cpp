@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -98,20 +99,229 @@ std::size_t parse_count(const std::string& text) {
     return static_cast<std::size_t>(value);
 }
 
+std::uint64_t parse_u64(const std::string& text, const char* name) {
+    std::size_t used = 0;
+    const auto value = std::stoull(text, &used);
+    if (used != text.size()) throw std::invalid_argument(std::string("invalid ") + name);
+    return value;
+}
+
+std::size_t parse_chunk_bytes(const std::string& text) {
+    const auto mib = parse_count(text);
+    if (mib > std::numeric_limits<std::size_t>::max() / (1024U * 1024U))
+        throw std::invalid_argument("chunk size is too large");
+    return mib * 1024U * 1024U;
+}
+
+template <typename Callback>
+std::uint64_t for_each_stream_block(const std::string& path, std::size_t chunk_bytes,
+                                    Callback callback, std::uint64_t offset_bytes = 0,
+                                    std::uint64_t length_bytes = 0) {
+    chunk_bytes -= chunk_bytes % fpc_bsel::kBlockSize;
+    if (chunk_bytes < fpc_bsel::kBlockSize)
+        throw std::invalid_argument("stream chunk is too small");
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error("cannot open input: " + path);
+    if (offset_bytes % fpc_bsel::kBlockSize != 0 ||
+        (length_bytes != 0 && length_bytes % fpc_bsel::kBlockSize != 0))
+        throw std::invalid_argument("stream range must be aligned to 64 bytes");
+    input.seekg(static_cast<std::streamoff>(offset_bytes));
+    if (!input) throw std::runtime_error("cannot seek stream input");
+    Bytes buffer(chunk_bytes);
+    std::uint64_t blocks = 0;
+    std::uint64_t remaining = length_bytes;
+    while (input && (length_bytes == 0 || remaining != 0)) {
+        const auto request = length_bytes == 0
+            ? buffer.size()
+            : static_cast<std::size_t>(std::min<std::uint64_t>(remaining, buffer.size()));
+        input.read(reinterpret_cast<char*>(buffer.data()),
+                   static_cast<std::streamsize>(request));
+        const auto bytes = static_cast<std::size_t>(input.gcount());
+        if (bytes == 0) break;
+        if (bytes % fpc_bsel::kBlockSize != 0)
+            throw std::invalid_argument("input size must be a multiple of 64 bytes");
+        if (length_bytes != 0) remaining -= bytes;
+        for (std::size_t offset = 0; offset < bytes; offset += fpc_bsel::kBlockSize) {
+            callback(Bytes(buffer.begin() + static_cast<std::ptrdiff_t>(offset),
+                           buffer.begin() + static_cast<std::ptrdiff_t>(
+                               offset + fpc_bsel::kBlockSize)));
+            ++blocks;
+        }
+    }
+    if (length_bytes != 0 && remaining != 0)
+        throw std::runtime_error("stream range exceeds input size");
+    return blocks;
+}
+
 void usage() {
     std::cout <<
         "usage:\n"
         "  fpc-bsel train INPUT MODEL [--max-patterns N]\n"
+        "  fpc-bsel train-stream INPUT MODEL --max-patterns N [--chunk-mib N]\n"
+        "  fpc-bsel train-budget-stream INPUT MODEL --budget-kib N [--chunk-mib N]\n"
+        "  fpc-bsel train-budget-range INPUT MODEL --budget-kib N --offset-bytes N --length-bytes N [--chunk-mib N]\n"
+        "  fpc-bsel resize-model INPUT_MODEL OUTPUT_MODEL --max-patterns N\n"
         "  fpc-bsel compress MODEL INPUT OUTPUT\n"
         "  fpc-bsel decompress MODEL INPUT OUTPUT\n"
         "  fpc-bsel evaluate MODEL INPUT\n"
-        "  fpc-bsel roundtrip MODEL INPUT\n";
+        "  fpc-bsel roundtrip MODEL INPUT\n"
+        "  fpc-bsel evaluate-stream MODEL INPUT [--chunk-mib N]\n"
+        "  fpc-bsel roundtrip-stream MODEL INPUT [--chunk-mib N]\n"
+        "  fpc-bsel evaluate-range MODEL INPUT --offset-bytes N --length-bytes N [--chunk-mib N]\n"
+        "  fpc-bsel roundtrip-range MODEL INPUT --offset-bytes N --length-bytes N [--chunk-mib N]\n";
 }
 }
 
 int main(int argc, char** argv) try {
     if (argc < 2) { usage(); return 1; }
     const std::string command = argv[1];
+    if (command == "train-budget-stream" || command == "train-budget-range") {
+        const bool range = command == "train-budget-range";
+        if ((!range && argc != 6 && argc != 8) ||
+            (range && argc != 10 && argc != 12))
+            throw std::invalid_argument("invalid budget stream training arguments");
+        if (std::string(argv[4]) != "--budget-kib")
+            throw std::invalid_argument("expected --budget-kib");
+        const auto budget_kib = parse_count(argv[5]);
+        const auto budget_bytes = budget_kib * 1024U;
+        std::uint64_t offset_bytes = 0, length_bytes = 0;
+        if (range) {
+            if (std::string(argv[6]) != "--offset-bytes" ||
+                std::string(argv[8]) != "--length-bytes")
+                throw std::invalid_argument("expected stream range options");
+            offset_bytes = parse_u64(argv[7], "offset");
+            length_bytes = parse_u64(argv[9], "length");
+        }
+        std::size_t chunk_bytes = 64U * 1024U * 1024U;
+        const auto chunk_option = range ? 10 : 6;
+        if (argc == chunk_option + 2) {
+            if (std::string(argv[chunk_option]) != "--chunk-mib")
+                throw std::invalid_argument("expected --chunk-mib");
+            chunk_bytes = parse_chunk_bytes(argv[chunk_option + 1]);
+        }
+        std::uint64_t blocks = 0;
+        const auto model = fpc_bsel::train_model_stream(
+            argv[2], 256, chunk_bytes, &blocks, budget_bytes,
+            offset_bytes, length_bytes);
+        fpc_bsel::save_model(model, argv[3]);
+        const auto table_bytes = model.prefix.patterns.size() * fpc_bsel::kWordCount +
+                                 model.residual.patterns.size() * fpc_bsel::kBlockSize;
+        std::cout << "trained_budget_stream blocks=" << blocks
+                  << " prefix_patterns=" << model.prefix.patterns.size()
+                  << " residual_patterns=" << model.residual.patterns.size()
+                  << " table_bytes=" << table_bytes
+                  << " budget_bytes=" << budget_bytes
+                  << " chunk_bytes=" << chunk_bytes << '\n';
+        return 0;
+    }
+    if (command == "resize-model") {
+        if (argc != 6 || std::string(argv[4]) != "--max-patterns")
+            throw std::invalid_argument("invalid resize-model arguments");
+        const auto max_patterns = parse_count(argv[5]);
+        if (max_patterns > 256)
+            throw std::invalid_argument("FPC-BSEL Top-256 requires at most 256 patterns");
+        auto model = fpc_bsel::load_model(argv[2]);
+        if (model.prefix.patterns.size() > max_patterns)
+            model.prefix.patterns.resize(max_patterns);
+        if (model.residual.patterns.size() > max_patterns)
+            model.residual.patterns.resize(max_patterns);
+        fpc_bsel::save_model(model, argv[3]);
+        std::cout << "resized prefix_patterns=" << model.prefix.patterns.size()
+                  << " residual_patterns=" << model.residual.patterns.size() << '\n';
+        return 0;
+    }
+    if (command == "train-stream") {
+        if (argc != 6 && argc != 8) throw std::invalid_argument("invalid stream training arguments");
+        if (std::string(argv[4]) != "--max-patterns")
+            throw std::invalid_argument("expected --max-patterns");
+        const auto max_patterns = parse_count(argv[5]);
+        std::size_t chunk_bytes = 64U * 1024U * 1024U;
+        if (argc == 8) {
+            if (std::string(argv[6]) != "--chunk-mib")
+                throw std::invalid_argument("expected --chunk-mib");
+            chunk_bytes = parse_chunk_bytes(argv[7]);
+        }
+        std::uint64_t blocks = 0;
+        const auto model = fpc_bsel::train_model_stream(
+            argv[2], max_patterns, chunk_bytes, &blocks);
+        fpc_bsel::save_model(model, argv[3]);
+        std::cout << "trained_stream blocks=" << blocks
+                  << " prefix_patterns=" << model.prefix.patterns.size()
+                  << " residual_patterns=" << model.residual.patterns.size()
+                  << " chunk_bytes=" << chunk_bytes << '\n';
+        return 0;
+    }
+    if (command == "evaluate-stream" || command == "roundtrip-stream" ||
+        command == "evaluate-range" || command == "roundtrip-range") {
+        const bool range = command == "evaluate-range" || command == "roundtrip-range";
+        if ((!range && argc != 4 && argc != 6) ||
+            (range && argc != 8 && argc != 10))
+            throw std::invalid_argument("invalid stream evaluation arguments");
+        std::uint64_t offset_bytes = 0, length_bytes = 0;
+        if (range) {
+            if (std::string(argv[4]) != "--offset-bytes" ||
+                std::string(argv[6]) != "--length-bytes")
+                throw std::invalid_argument("expected stream range options");
+            offset_bytes = parse_u64(argv[5], "offset");
+            length_bytes = parse_u64(argv[7], "length");
+        }
+        std::size_t chunk_bytes = 64U * 1024U * 1024U;
+        const auto chunk_option = range ? 8 : 4;
+        if (argc == chunk_option + 2) {
+            if (std::string(argv[chunk_option]) != "--chunk-mib")
+                throw std::invalid_argument("expected --chunk-mib");
+            chunk_bytes = parse_chunk_bytes(argv[chunk_option + 1]);
+        }
+        const auto model = fpc_bsel::load_model(argv[2]);
+        std::uint64_t physical_bytes = 0, encoded_bytes = 0;
+        std::uint64_t prefix_only_bytes = 0, residual_only_bytes = 0;
+        std::uint64_t raw = 0, fpc = 0, bitshuffle = 0, combined = 0;
+        std::uint64_t prefix = 0, residual = 0, inline_prefix = 0;
+        const auto blocks = for_each_stream_block(
+            argv[3], chunk_bytes, [&](const Bytes& block) {
+                const auto encoded = fpc_bsel::encode_block(block, model);
+                physical_bytes += encoded.bytes.size();
+                encoded_bytes += encoded.bytes.size() - 1;
+                const auto prefix_only =
+                    fpc_bsel::encode_block(block, model, {true, false});
+                const auto residual_only =
+                    fpc_bsel::encode_block(block, model, {false, true});
+                prefix_only_bytes += prefix_only.bytes.size() - 1;
+                residual_only_bytes += residual_only.bytes.size() - 1;
+                if (encoded.mode == fpc_bsel::BlockMode::Raw) ++raw;
+                else if (encoded.mode == fpc_bsel::BlockMode::Fpc) ++fpc;
+                else if (encoded.mode == fpc_bsel::BlockMode::FpcBitshuffle) ++bitshuffle;
+                else {
+                    ++combined;
+                    prefix += encoded.prefix_bsel;
+                    residual += encoded.residual_bsel;
+                    inline_prefix += encoded.prefix_id_inline;
+                }
+                if ((command == "roundtrip-stream" || command == "roundtrip-range") &&
+                    fpc_bsel::decode_block(encoded.bytes, model) != block)
+                    throw std::runtime_error("stream round-trip mismatch");
+            }, offset_bytes, length_bytes);
+        const auto original_bytes = blocks * fpc_bsel::kBlockSize;
+        std::cout << "blocks=" << blocks << " original_bytes=" << original_bytes
+                  << " encoded_bytes=" << encoded_bytes
+                  << " physical_encoded_bytes=" << physical_bytes
+                  << " chunk_bytes=" << chunk_bytes << std::fixed
+                  << std::setprecision(4)
+                  << " ratio=" << static_cast<double>(original_bytes) / encoded_bytes
+                  << " raw_blocks=" << raw << " fpc_blocks=" << fpc
+                  << " bitshuffle_fpc_blocks=" << bitshuffle
+                  << " fpc_bsel_blocks=" << combined
+                  << " prefix_bsel_blocks=" << prefix
+                  << " residual_bsel_blocks=" << residual
+                  << " inline_prefix_id_blocks=" << inline_prefix << '\n';
+        std::cout << "ablation prefix_only_encoded_bytes=" << prefix_only_bytes
+                  << " prefix_only_ratio="
+                  << static_cast<double>(original_bytes) / prefix_only_bytes
+                  << " residual_only_encoded_bytes=" << residual_only_bytes
+                  << " residual_only_ratio="
+                  << static_cast<double>(original_bytes) / residual_only_bytes << '\n';
+        return 0;
+    }
     if (command == "train") {
         if (argc != 4 && argc != 6) throw std::invalid_argument("invalid train arguments");
         std::size_t max_patterns = 256;
@@ -145,7 +355,7 @@ int main(int argc, char** argv) try {
         const auto blocks = blocks_from(input);
         std::uint64_t physical_bytes = 0, encoded_bytes = 0;
         std::uint64_t prefix_only_bytes = 0, residual_only_bytes = 0;
-        std::uint64_t raw = 0, fpc = 0, combined = 0, prefix = 0, residual = 0, inline_prefix = 0;
+        std::uint64_t raw = 0, fpc = 0, bitshuffle = 0, combined = 0, prefix = 0, residual = 0, inline_prefix = 0;
         for (const auto& block : blocks) {
             const auto encoded = fpc_bsel::encode_block(block, model);
             physical_bytes += encoded.bytes.size();
@@ -159,6 +369,7 @@ int main(int argc, char** argv) try {
             residual_only_bytes += residual_only.bytes.size() - 1;
             if (encoded.mode == fpc_bsel::BlockMode::Raw) ++raw;
             else if (encoded.mode == fpc_bsel::BlockMode::Fpc) ++fpc;
+            else if (encoded.mode == fpc_bsel::BlockMode::FpcBitshuffle) ++bitshuffle;
             else { ++combined; prefix += encoded.prefix_bsel; residual += encoded.residual_bsel;
                    inline_prefix += encoded.prefix_id_inline; }
             if (command == "roundtrip" && fpc_bsel::decode_block(encoded.bytes, model) != block)
@@ -169,6 +380,7 @@ int main(int argc, char** argv) try {
                   << " physical_encoded_bytes=" << physical_bytes << std::fixed << std::setprecision(4)
                   << " ratio=" << static_cast<double>(input.size()) / encoded_bytes
                   << " raw_blocks=" << raw << " fpc_blocks=" << fpc
+                  << " bitshuffle_fpc_blocks=" << bitshuffle
                   << " fpc_bsel_blocks=" << combined << " prefix_bsel_blocks=" << prefix
                   << " residual_bsel_blocks=" << residual
                   << " inline_prefix_id_blocks=" << inline_prefix << '\n';

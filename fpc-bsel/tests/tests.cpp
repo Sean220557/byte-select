@@ -29,6 +29,17 @@ int main() try {
     check(fpc_bsel::fpc_decode(fpc_bsel::fpc_encode(zeros)) == zeros, "zero FPC round trip");
     check(fpc_bsel::fpc_decode(fpc_bsel::fpc_encode(patterns)) == patterns,
           "all-pattern FPC round trip");
+    fpc_bsel::Bytes bitplane;
+    for (std::uint32_t word = 0; word < fpc_bsel::kWordCount; ++word) {
+        const auto value = 0xdeadbeefU ^ (1U << word);
+        for (unsigned byte = 0; byte < 4; ++byte)
+            bitplane.push_back(static_cast<std::uint8_t>(value >> (8U * byte)));
+    }
+    const auto shuffled = fpc_bsel::bitshuffle_words16(bitplane);
+    check(fpc_bsel::bitunshuffle_words16(shuffled) == bitplane,
+          "bitshuffle round trip");
+    check(fpc_bsel::fpc_encode(shuffled).size() < fpc_bsel::fpc_encode(bitplane).size(),
+          "bitshuffle improves bit-plane input");
     check(fpc_bsel::pack_tags(fpc_bsel::split_fpc(patterns).tags).size() == 6,
           "packed prefix size");
 
@@ -36,6 +47,13 @@ int main() try {
     for (int i = 0; i < 30; ++i) training.push_back(patterns);
     for (int i = 0; i < 30; ++i) training.push_back(mixed_residual);
     const auto model = fpc_bsel::train_model(training, 32);
+    bool top256_rejected = false;
+    try {
+        (void)fpc_bsel::train_model(training, 257);
+    } catch (const std::invalid_argument&) {
+        top256_rejected = true;
+    }
+    check(top256_rejected, "Top-256 model limit");
     const auto zero_encoded = fpc_bsel::encode_block(zeros, model);
     check(zero_encoded.mode == fpc_bsel::BlockMode::FpcBsel && zero_encoded.prefix_bsel,
           "prefix BSEL path selected");

@@ -53,6 +53,8 @@ BselModel read_set(std::istream& in) {
 }
 
 Model train_model(const std::vector<Bytes>& blocks, std::size_t max_patterns) {
+    if (max_patterns == 0 || max_patterns > 256)
+        throw std::invalid_argument("FPC-BSEL Top-256 requires 1..256 patterns");
     if (blocks.empty()) throw std::invalid_argument("training input has no complete blocks");
     std::vector<Bytes> prefixes;
     std::vector<Bytes> residuals;

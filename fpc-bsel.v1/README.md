@@ -13,7 +13,8 @@ the eight FPC patterns. A 16-byte Byte-Select model may compress the expanded
 3-bit prefix vector, while a separate 64-byte Byte-Select model may compress a
 zero-filled residual block containing only FPC pattern-7 words. Each component
 uses BSEL only when its real representation is smaller. The final block is the
-smallest real stream among raw, conventional FPC, and FPC+BSEL.
+smallest real stream among raw, conventional FPC, bitshuffled FPC, and
+FPC+BSEL. Training is capped at the Top-256 prefix and residual patterns.
 
 ## Build and test
 

@@ -47,6 +47,13 @@ EncodedBlock encode_block(const Bytes& block, const Model& model, EncodeOptions 
         best.bytes.insert(best.bytes.end(), fpc.begin(), fpc.end());
     }
 
+    const auto shuffled = fpc_encode(bitshuffle_words16(block));
+    if (1 + shuffled.size() < best.bytes.size()) {
+        best.mode = BlockMode::FpcBitshuffle;
+        best.bytes = {static_cast<std::uint8_t>(BlockMode::FpcBitshuffle)};
+        best.bytes.insert(best.bytes.end(), shuffled.begin(), shuffled.end());
+    }
+
     const auto parts = split_fpc(block);
     auto prefix = pack_tags(parts.tags);
     bool prefix_bsel = false;
@@ -104,6 +111,8 @@ Bytes decode_block(const Bytes& encoded, const Model& model) {
         return Bytes(encoded.begin() + 1, encoded.end());
     }
     if (mode == BlockMode::Fpc) return fpc_decode(Bytes(encoded.begin() + 1, encoded.end()));
+    if (mode == BlockMode::FpcBitshuffle)
+        return bitunshuffle_words16(fpc_decode(Bytes(encoded.begin() + 1, encoded.end())));
     if (mode != BlockMode::FpcBsel || encoded.size() < 2)
         throw std::runtime_error("unknown FPC-BSEL block mode");
 

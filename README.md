@@ -189,7 +189,16 @@ with first-fit decreasing into 64B physical segments. Use `--placement aligned`
 to reproduce the older per-record aligned placement. `tail-split-v3` further
 splits records larger than 64B into full 64B segments plus a packable tail; this
 models an optimistic controller that can place a record's final partial segment
-with other tails.
+with other tails. `two-ended-tail-v4` keeps v3's `full segments + tail` split,
+but uses an online, read/write-oriented policy. Existing compressed data stays
+at the low-address end of a 64B segment and one incoming tail may occupy the
+high-address end. The controller chooses an older padding segment that leaves
+the largest middle gap. For example, 131B is represented as a contiguous 128B
+body plus a 3B tail placed at the opposite end of an earlier padding segment.
+`spaced-padding-v5` generalizes this without splitting the tail itself. It keeps
+all occupied intervals in a segment, reuses sufficiently large middle padding,
+and places each new intact tail where its minimum distance from neighboring
+records is largest, with at least a one-byte guard.
 
 ```powershell
 .\build\bsel.exe train test.trace bsel.model --block-size 256 --target 128:256:1
@@ -198,7 +207,9 @@ with other tails.
 
 Use `mcc-compare` to run Byte-Select and all software baselines through the
 same MCC address-placement model, reporting the quantized ratio before MCC
-packing, after `segment-v1`, after `region-ffd-v2`, and after `tail-split-v3`:
+packing, after `segment-v1`, after `region-ffd-v2`, after `tail-split-v3`, and
+after `two-ended-tail-v4`. `spaced-padding-v5` is also emitted as the
+hardware-bounded multi-record padding policy:
 
 ```powershell
 .\build\bsel.exe mcc-compare bsel.model test.trace

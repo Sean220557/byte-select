@@ -21,5 +21,7 @@ std::size_t regular_payload_size(const std::array<std::uint8_t, kWordCount>& tag
 std::size_t raw_residual_size(const std::array<std::uint8_t, kWordCount>& tags);
 Bytes fpc_encode(const Bytes& block);
 Bytes fpc_decode(const Bytes& encoded);
+Bytes bitshuffle_words16(const Bytes& block);
+Bytes bitunshuffle_words16(const Bytes& block);
 
 }

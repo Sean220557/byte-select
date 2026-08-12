@@ -4,7 +4,7 @@
 
 namespace fpc_bsel {
 
-enum class BlockMode : std::uint8_t { Raw = 0, Fpc = 1, FpcBsel = 2 };
+enum class BlockMode : std::uint8_t { Raw = 0, Fpc = 1, FpcBsel = 2, FpcBitshuffle = 3 };
 
 struct EncodedBlock {
     BlockMode mode = BlockMode::Raw;

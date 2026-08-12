@@ -550,6 +550,34 @@ void test_mcc_layout() {
         tail_records, 256, {0, 64, 4096, true, bsel::MccPlacementMode::TailSplitV3});
     check(tail_v2.stats.physical_bytes == 512 && tail_v3.stats.physical_bytes == 384,
           "MCC v3 packs split tails from multi-segment records");
+
+    const std::vector<std::size_t> two_ended_records{20, 131, 40};
+    const auto tail_v4 = bsel::place_stored_blocks_in_memory(
+        two_ended_records, 256,
+        {0, 64, 4096, true, bsel::MccPlacementMode::TwoEndedTailV4});
+    check(tail_v4.entries[0].physical_address == 0 &&
+              tail_v4.entries[0].segment_offset == 0,
+          "MCC v4 keeps the existing compressed record at the low end");
+    check(tail_v4.entries[1].physical_address == 64 &&
+              tail_v4.entries[1].tail_address == 61 &&
+              tail_v4.entries[1].tail_offset == 61 &&
+              tail_v4.entries[1].tail_bytes == 3,
+          "MCC v4 splits 131B into a 128B body and a reverse 3B tail");
+    check(tail_v4.entries[2].physical_address == 192 &&
+              tail_v4.stats.stored_bytes == 191 &&
+              tail_v4.stats.physical_bytes == 256,
+          "MCC v4 reserves the middle gap and limits a segment to two ends");
+
+    const std::vector<std::size_t> spaced_records{20, 3, 10};
+    const auto tail_v5 = bsel::place_stored_blocks_in_memory(
+        spaced_records, 256,
+        {0, 64, 4096, true, bsel::MccPlacementMode::SpacedPaddingV5});
+    check(tail_v5.entries[0].segment_offset == 0 &&
+              tail_v5.entries[1].segment_offset == 61 &&
+              tail_v5.entries[2].segment_offset == 35,
+          "MCC v5 places an intact third tail in the middle padding with spacing");
+    check(tail_v5.stats.stored_bytes == 33 && tail_v5.stats.physical_bytes == 64,
+          "MCC v5 reuses middle padding instead of opening another segment");
 }
 
 void test_rtl_generation() {

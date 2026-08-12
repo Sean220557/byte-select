@@ -12,7 +12,9 @@ enum class MccPlacementMode {
     AlignedRecords,
     SegmentPackingV1,
     RegionFfdV2,
-    TailSplitV3
+    TailSplitV3,
+    TwoEndedTailV4,
+    SpacedPaddingV5
 };
 
 struct MccConfig {
@@ -32,6 +34,10 @@ struct MccEntry {
     bool compressed = false;
     std::size_t set_index = 0;
     std::size_t metadata = 0;
+    std::uint64_t tail_address = 0;
+    std::uint64_t tail_metadata_region = 0;
+    std::size_t tail_offset = 0;
+    std::size_t tail_bytes = 0;
 };
 
 struct MccStats {

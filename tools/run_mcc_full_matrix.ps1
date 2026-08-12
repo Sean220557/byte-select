@@ -32,15 +32,18 @@ function Add-SummaryRow($path, $algorithm, $version, $mccOutput) {
     $v1 = $rows["mcc_sizes_v1"]
     $v2 = $rows["mcc_sizes_v2"]
     $v3 = $rows["mcc_sizes_v3"]
-    $csv = "{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18}" -f `
+    $v4 = $rows["mcc_sizes_v4"]
+    $csv = "{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18},{19},{20},{21},{22}" -f `
         $algorithm,$version,$before.blocks,$before.original_bytes,$before.stored_bytes,`
         $before.physical_bytes,$before.quantized_ratio,$v1.physical_bytes,`
         $v1.quantized_ratio,$v1.metadata_regions,$v2.physical_bytes,`
         $v2.quantized_ratio,$v2.metadata_regions,$v3.physical_bytes,`
-        $v3.quantized_ratio,$v3.metadata_regions,`
+        $v3.quantized_ratio,$v3.metadata_regions,$v4.physical_bytes,`
+        $v4.quantized_ratio,$v4.metadata_regions,`
         ([int64]$before.physical_bytes - [int64]$v1.physical_bytes),`
         ([int64]$before.physical_bytes - [int64]$v2.physical_bytes),`
-        ([int64]$before.physical_bytes - [int64]$v3.physical_bytes)
+        ([int64]$before.physical_bytes - [int64]$v3.physical_bytes),`
+        ([int64]$before.physical_bytes - [int64]$v4.physical_bytes)
     Add-Content $path $csv
 }
 
@@ -52,26 +55,31 @@ function Add-CompareRows($path, $mccCompareOutput, $originalBytes, $blocks) {
         $name = $v.algorithm
         $isV2 = $name.EndsWith("_v2")
         $isV3 = $name.EndsWith("_v3")
-        $base = if ($isV2 -or $isV3) { $name.Substring(0, $name.Length - 3) } else { $name }
+        $isV4 = $name.EndsWith("_v4")
+        $base = if ($isV2 -or $isV3 -or $isV4) { $name.Substring(0, $name.Length - 3) } else { $name }
         if (!$pending.ContainsKey($base)) { $pending[$base] = @{} }
         if ($isV2) { $pending[$base].v2 = $v }
         elseif ($isV3) { $pending[$base].v3 = $v }
+        elseif ($isV4) { $pending[$base].v4 = $v }
         else { $pending[$base].v1 = $v }
     }
     foreach ($name in ($pending.Keys | Sort-Object)) {
         $pair = $pending[$name]
-        if (!$pair.v1 -or !$pair.v2 -or !$pair.v3) { continue }
+        if (!$pair.v1 -or !$pair.v2 -or !$pair.v3 -or !$pair.v4) { continue }
         $v1 = $pair.v1
         $v2 = $pair.v2
         $v3 = $pair.v3
-        $csv = "{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18}" -f `
+        $v4 = $pair.v4
+        $csv = "{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14},{15},{16},{17},{18},{19},{20},{21},{22}" -f `
             $name,"builtin",$blocks,$originalBytes,"",$v1.before_physical_bytes,`
             $v1.before_quantized_ratio,$v1.after_physical_bytes,`
             $v1.after_quantized_ratio,$v1.after_metadata_regions,`
             $v2.after_physical_bytes,$v2.after_quantized_ratio,`
             $v2.after_metadata_regions,$v3.after_physical_bytes,`
             $v3.after_quantized_ratio,$v3.after_metadata_regions,`
-            $v1.saved_physical_bytes,$v2.saved_physical_bytes,$v3.saved_physical_bytes
+            $v4.after_physical_bytes,$v4.after_quantized_ratio,`
+            $v4.after_metadata_regions,$v1.saved_physical_bytes,`
+            $v2.saved_physical_bytes,$v3.saved_physical_bytes,$v4.saved_physical_bytes
         Add-Content $path $csv
     }
 }
@@ -124,7 +132,7 @@ function Run-Standalone($family, $version, $dir, $exeName, $summaryPath) {
 }
 
 $summary = Join-Path $out "summary.csv"
-Set-Content $summary "algorithm,version,blocks,original_bytes,stored_bytes,before_physical_bytes,before_quantized_ratio,v1_physical_bytes,v1_quantized_ratio,v1_metadata_regions,v2_physical_bytes,v2_quantized_ratio,v2_metadata_regions,v3_physical_bytes,v3_quantized_ratio,v3_metadata_regions,v1_saved_physical_bytes,v2_saved_physical_bytes,v3_saved_physical_bytes"
+Set-Content $summary "algorithm,version,blocks,original_bytes,stored_bytes,before_physical_bytes,before_quantized_ratio,v1_physical_bytes,v1_quantized_ratio,v1_metadata_regions,v2_physical_bytes,v2_quantized_ratio,v2_metadata_regions,v3_physical_bytes,v3_quantized_ratio,v3_metadata_regions,v4_physical_bytes,v4_quantized_ratio,v4_metadata_regions,v1_saved_physical_bytes,v2_saved_physical_bytes,v3_saved_physical_bytes,v4_saved_physical_bytes"
 
 # Built-in baselines and BSel.
 $model = Join-Path $out "byte-select.model"

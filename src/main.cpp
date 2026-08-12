@@ -1260,7 +1260,7 @@ void command_patterns(int argc, char** argv) {
 
 void command_mcc(int argc, char** argv) {
     if (argc < 4) {
-        throw std::runtime_error("usage: bsel mcc MODEL INPUT [--base N] [--alignment N] [--metadata-granularity N] [--placement aligned|segment-v1|region-ffd-v2|tail-split-v3] [--limit N] [--no-fill-padding]");
+        throw std::runtime_error("usage: bsel mcc MODEL INPUT [--base N] [--alignment N] [--metadata-granularity N] [--placement aligned|segment-v1|region-ffd-v2|tail-split-v3|two-ended-tail-v4|spaced-padding-v5] [--limit N] [--no-fill-padding]");
     }
     bsel::MccConfig config;
     std::size_t limit = std::numeric_limits<std::size_t>::max();
@@ -1282,8 +1282,12 @@ void command_mcc(int argc, char** argv) {
                 config.placement_mode = bsel::MccPlacementMode::RegionFfdV2;
             } else if (mode == "tail-split-v3" || mode == "v3") {
                 config.placement_mode = bsel::MccPlacementMode::TailSplitV3;
+            } else if (mode == "two-ended-tail-v4" || mode == "v4") {
+                config.placement_mode = bsel::MccPlacementMode::TwoEndedTailV4;
+            } else if (mode == "spaced-padding-v5" || mode == "v5") {
+                config.placement_mode = bsel::MccPlacementMode::SpacedPaddingV5;
             } else {
-                throw std::runtime_error("MCC placement must be aligned, segment-v1, region-ffd-v2, or tail-split-v3");
+                throw std::runtime_error("MCC placement must be aligned, segment-v1, region-ffd-v2, tail-split-v3, two-ended-tail-v4, or spaced-padding-v5");
             }
         } else if (option == "--limit" && i + 1 < argc) {
             limit = parse_size(argv[++i], "limit");
@@ -1318,6 +1322,10 @@ void command_mcc(int argc, char** argv) {
                   << " metadata_region=" << entry.metadata_region
                   << " segment_offset=" << entry.segment_offset
                   << " stored_bytes=" << entry.stored_bytes
+                  << " tail_address=" << entry.tail_address
+                  << " tail_metadata_region=" << entry.tail_metadata_region
+                  << " tail_offset=" << entry.tail_offset
+                  << " tail_bytes=" << entry.tail_bytes
                   << " compressed=" << (entry.compressed ? 1 : 0)
                   << " set_index=" << entry.set_index
                   << " metadata=" << entry.metadata << '\n';
@@ -1408,6 +1416,10 @@ void command_mcc_sizes(int argc, char** argv) {
     v2_config.placement_mode = bsel::MccPlacementMode::RegionFfdV2;
     auto v3_config = config;
     v3_config.placement_mode = bsel::MccPlacementMode::TailSplitV3;
+    auto v4_config = config;
+    v4_config.placement_mode = bsel::MccPlacementMode::TwoEndedTailV4;
+    auto v5_config = config;
+    v5_config.placement_mode = bsel::MccPlacementMode::SpacedPaddingV5;
     print_mcc_layout_summary(
         "mcc_sizes_before",
         bsel::place_stored_blocks_in_memory(sizes, block_size, before_config));
@@ -1420,6 +1432,12 @@ void command_mcc_sizes(int argc, char** argv) {
     print_mcc_layout_summary(
         "mcc_sizes_v3",
         bsel::place_stored_blocks_in_memory(sizes, block_size, v3_config));
+    print_mcc_layout_summary(
+        "mcc_sizes_v4",
+        bsel::place_stored_blocks_in_memory(sizes, block_size, v4_config));
+    print_mcc_layout_summary(
+        "mcc_sizes_v5",
+        bsel::place_stored_blocks_in_memory(sizes, block_size, v5_config));
 }
 
 void print_mcc_comparison_row(const std::string& algorithm,
@@ -1477,6 +1495,12 @@ void command_mcc_compare(int argc, char** argv) {
     auto v3_config = config;
     v3_config.fill_padding = true;
     v3_config.placement_mode = bsel::MccPlacementMode::TailSplitV3;
+    auto v4_config = config;
+    v4_config.fill_padding = true;
+    v4_config.placement_mode = bsel::MccPlacementMode::TwoEndedTailV4;
+    auto v5_config = config;
+    v5_config.fill_padding = true;
+    v5_config.placement_mode = bsel::MccPlacementMode::SpacedPaddingV5;
 
     print_mcc_comparison_row("bsel",
                              bsel::place_blocks_in_memory(blocks, model, before_config),
@@ -1487,6 +1511,12 @@ void command_mcc_compare(int argc, char** argv) {
     print_mcc_comparison_row("bsel_v3",
                              bsel::place_blocks_in_memory(blocks, model, before_config),
                              bsel::place_blocks_in_memory(blocks, model, v3_config));
+    print_mcc_comparison_row("bsel_v4",
+                             bsel::place_blocks_in_memory(blocks, model, before_config),
+                             bsel::place_blocks_in_memory(blocks, model, v4_config));
+    print_mcc_comparison_row("bsel_v5",
+                             bsel::place_blocks_in_memory(blocks, model, before_config),
+                             bsel::place_blocks_in_memory(blocks, model, v5_config));
     const std::vector<bsel::BaselineKind> baselines{
         bsel::BaselineKind::Fpc, bsel::BaselineKind::Bdi,
         bsel::BaselineKind::HybridBdiFpc, bsel::BaselineKind::Cpack,
@@ -1506,6 +1536,14 @@ void command_mcc_compare(int argc, char** argv) {
                 std::string(bsel::baseline_kind_name(kind)) + "_v3",
                 bsel::place_stored_blocks_in_memory(sizes, model.block_size, before_config),
                 bsel::place_stored_blocks_in_memory(sizes, model.block_size, v3_config));
+            print_mcc_comparison_row(
+                std::string(bsel::baseline_kind_name(kind)) + "_v4",
+                bsel::place_stored_blocks_in_memory(sizes, model.block_size, before_config),
+                bsel::place_stored_blocks_in_memory(sizes, model.block_size, v4_config));
+            print_mcc_comparison_row(
+                std::string(bsel::baseline_kind_name(kind)) + "_v5",
+                bsel::place_stored_blocks_in_memory(sizes, model.block_size, before_config),
+                bsel::place_stored_blocks_in_memory(sizes, model.block_size, v5_config));
         } catch (const std::exception& error) {
             std::cout << "mcc_compare algorithm=" << bsel::baseline_kind_name(kind)
                       << " status=unsupported reason=\"" << error.what() << "\"\n";
@@ -1525,6 +1563,14 @@ void command_mcc_compare(int argc, char** argv) {
         "fpc-top256_v3",
         bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, before_config),
         bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, v3_config));
+    print_mcc_comparison_row(
+        "fpc-top256_v4",
+        bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, v4_config));
+    print_mcc_comparison_row(
+        "fpc-top256_v5",
+        bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, v5_config));
 
     const auto word256 = bsel::train_fpc_residual_word256(blocks);
     const auto word256_sizes = fpc_residual_word256_stored_sizes(blocks, word256);
@@ -1540,6 +1586,14 @@ void command_mcc_compare(int argc, char** argv) {
         "fpc-resword256_v3",
         bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, before_config),
         bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, v3_config));
+    print_mcc_comparison_row(
+        "fpc-resword256_v4",
+        bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, v4_config));
+    print_mcc_comparison_row(
+        "fpc-resword256_v5",
+        bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, v5_config));
 
     const auto word64 = bsel::train_fpc_residual_word_dict(blocks, 64);
     const auto word64_sizes = fpc_residual_word256_stored_sizes(blocks, word64);
@@ -1555,6 +1609,14 @@ void command_mcc_compare(int argc, char** argv) {
         "fpc-resword64_v3",
         bsel::place_stored_blocks_in_memory(word64_sizes, model.block_size, before_config),
         bsel::place_stored_blocks_in_memory(word64_sizes, model.block_size, v3_config));
+    print_mcc_comparison_row(
+        "fpc-resword64_v4",
+        bsel::place_stored_blocks_in_memory(word64_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(word64_sizes, model.block_size, v4_config));
+    print_mcc_comparison_row(
+        "fpc-resword64_v5",
+        bsel::place_stored_blocks_in_memory(word64_sizes, model.block_size, before_config),
+        bsel::place_stored_blocks_in_memory(word64_sizes, model.block_size, v5_config));
 }
 
 void command_generate_rtl(int argc, char** argv) {
@@ -1591,7 +1653,7 @@ void print_usage() {
         << "  bsel decompress MODEL INPUT OUTPUT\n"
         << "  bsel patterns MODEL [--limit N]\n"
         << "  bsel mcc MODEL INPUT [--base N] [--alignment N] [--metadata-granularity N]\n"
-        << "           [--placement aligned|segment-v1|region-ffd-v2|tail-split-v3]\n"
+        << "           [--placement aligned|segment-v1|region-ffd-v2|tail-split-v3|two-ended-tail-v4|spaced-padding-v5]\n"
         << "           [--limit N] [--no-fill-padding]\n"
         << "  bsel mcc-compare MODEL INPUT [--base N] [--alignment N]\n"
         << "                   [--metadata-granularity N]\n"

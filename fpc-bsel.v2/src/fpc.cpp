@@ -124,6 +124,41 @@ std::uint32_t read_payload(BitReader& reader, std::uint8_t tag) {
 
 }
 
+Bytes bitshuffle_words16(const Bytes& block) {
+    if (block.size() != kBlockSize)
+        throw std::invalid_argument("bitshuffle requires a 64-byte block");
+    Bytes shuffled(kBlockSize, 0);
+    for (std::size_t word = 0; word < kWordCount; ++word) {
+        const auto value = load32(block, word * 4);
+        for (std::size_t bit = 0; bit < 32; ++bit) {
+            const auto output_bit = bit * kWordCount + word;
+            if ((value >> bit) & 1U)
+                shuffled[output_bit / 8] |=
+                    static_cast<std::uint8_t>(1U << (output_bit % 8));
+        }
+    }
+    return shuffled;
+}
+
+Bytes bitunshuffle_words16(const Bytes& block) {
+    if (block.size() != kBlockSize)
+        throw std::invalid_argument("bitunshuffle requires a 64-byte block");
+    Bytes restored;
+    restored.reserve(kBlockSize);
+    for (std::size_t word = 0; word < kWordCount; ++word) {
+        std::uint32_t value = 0;
+        for (std::size_t bit = 0; bit < 32; ++bit) {
+            const auto input_bit = bit * kWordCount + word;
+            value |= static_cast<std::uint32_t>(
+                         (block[input_bit / 8] >> (input_bit % 8)) & 1U)
+                     << bit;
+        }
+        store32(restored, value);
+    }
+    return restored;
+}
+
+
 FpcParts split_fpc(const Bytes& block) {
     if (block.size() != kBlockSize) throw std::invalid_argument("FPC-BSEL requires 64-byte blocks");
     FpcParts result;

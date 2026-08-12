@@ -35,6 +35,22 @@ struct Segment {
     std::size_t used = 0;
 };
 
+struct TwoEndedSegment {
+    std::uint64_t base = 0;
+    std::size_t low_used = 0;
+    std::size_t high_used = 0;
+};
+
+struct OccupiedRange {
+    std::size_t begin = 0;
+    std::size_t end = 0;
+};
+
+struct SpacedSegment {
+    std::uint64_t base = 0;
+    std::vector<OccupiedRange> occupied;
+};
+
 struct PendingRecord {
     std::size_t index = 0;
     std::size_t stored_bytes = 0;
@@ -237,6 +253,202 @@ MccLayout place_tail_split_v3(const std::vector<std::size_t>& stored_sizes,
     return layout;
 }
 
+MccLayout place_two_ended_tail_v4(const std::vector<std::size_t>& stored_sizes,
+                                  std::size_t block_size, MccConfig config) {
+    MccLayout layout;
+    layout.entries.resize(stored_sizes.size());
+    std::uint64_t cursor = align_up(config.base_address, config.alignment);
+    std::vector<TwoEndedSegment> tail_segments;
+
+    for (std::size_t i = 0; i < stored_sizes.size(); ++i) {
+        const auto stored_bytes = stored_sizes[i];
+        if (stored_bytes == 0 || stored_bytes > block_size) {
+            throw std::invalid_argument("MCC stored size must be within the block size");
+        }
+        account_entry(layout, block_size, stored_bytes);
+        const auto full_bytes = (stored_bytes / config.alignment) * config.alignment;
+        const auto tail_bytes = stored_bytes % config.alignment;
+        auto& entry = layout.entries[i];
+        entry.logical_block = static_cast<std::uint64_t>(i);
+        entry.stored_bytes = stored_bytes;
+        entry.compressed = stored_bytes < block_size;
+
+        if (full_bytes != 0) {
+            cursor = align_up(cursor, config.alignment);
+            entry.physical_address = cursor;
+            entry.metadata_region =
+                (cursor - config.base_address) / config.metadata_granularity;
+            cursor += full_bytes;
+        }
+        if (tail_bytes == 0) {
+            continue;
+        }
+
+        std::size_t best = tail_segments.size();
+        std::size_t best_gap = 0;
+        for (std::size_t segment = 0; segment < tail_segments.size(); ++segment) {
+            const auto& candidate = tail_segments[segment];
+            if (candidate.high_used != 0 ||
+                candidate.low_used + tail_bytes > config.alignment) {
+                continue;
+            }
+            const auto gap = config.alignment - candidate.low_used - tail_bytes;
+            if (best == tail_segments.size() || gap > best_gap) {
+                best = segment;
+                best_gap = gap;
+            }
+        }
+
+        std::uint64_t tail_address = 0;
+        std::size_t tail_offset = 0;
+        if (best != tail_segments.size()) {
+            auto& segment = tail_segments[best];
+            segment.high_used = tail_bytes;
+            tail_offset = config.alignment - tail_bytes;
+            tail_address = segment.base + tail_offset;
+        } else {
+            cursor = align_up(cursor, config.alignment);
+            tail_address = cursor;
+            tail_segments.push_back({cursor, tail_bytes, 0});
+            cursor += config.alignment;
+        }
+
+        const auto tail_region =
+            (tail_address - config.base_address) / config.metadata_granularity;
+        if (full_bytes == 0) {
+            entry.physical_address = tail_address;
+            entry.metadata_region = tail_region;
+            entry.segment_offset = tail_offset;
+        } else {
+            entry.tail_address = tail_address;
+            entry.tail_metadata_region = tail_region;
+            entry.tail_offset = tail_offset;
+            entry.tail_bytes = tail_bytes;
+        }
+    }
+
+    finish_layout(layout, config.base_address, cursor, config);
+    return layout;
+}
+
+MccLayout place_spaced_padding_v5(const std::vector<std::size_t>& stored_sizes,
+                                  std::size_t block_size, MccConfig config) {
+    constexpr std::size_t guard_bytes = 1;
+    struct Candidate {
+        std::size_t segment = 0;
+        std::size_t offset = 0;
+        std::size_t distance = 0;
+        bool found = false;
+    };
+
+    MccLayout layout;
+    layout.entries.resize(stored_sizes.size());
+    std::uint64_t cursor = align_up(config.base_address, config.alignment);
+    std::vector<SpacedSegment> padding_segments;
+
+    for (std::size_t i = 0; i < stored_sizes.size(); ++i) {
+        const auto stored_bytes = stored_sizes[i];
+        if (stored_bytes == 0 || stored_bytes > block_size) {
+            throw std::invalid_argument("MCC stored size must be within the block size");
+        }
+        account_entry(layout, block_size, stored_bytes);
+        const auto full_bytes = (stored_bytes / config.alignment) * config.alignment;
+        const auto tail_bytes = stored_bytes % config.alignment;
+        auto& entry = layout.entries[i];
+        entry.logical_block = static_cast<std::uint64_t>(i);
+        entry.stored_bytes = stored_bytes;
+        entry.compressed = stored_bytes < block_size;
+
+        if (full_bytes != 0) {
+            cursor = align_up(cursor, config.alignment);
+            entry.physical_address = cursor;
+            entry.metadata_region =
+                (cursor - config.base_address) / config.metadata_granularity;
+            cursor += full_bytes;
+        }
+        if (tail_bytes == 0) {
+            continue;
+        }
+
+        Candidate best;
+        const auto active_region =
+            (cursor - config.base_address) / config.metadata_granularity;
+        for (std::size_t segment_index = 0;
+             segment_index < padding_segments.size(); ++segment_index) {
+            const auto& segment = padding_segments[segment_index];
+            if ((segment.base - config.base_address) /
+                    config.metadata_granularity != active_region) {
+                continue;
+            }
+            for (std::size_t gap_index = 0;
+                 gap_index <= segment.occupied.size(); ++gap_index) {
+                const bool has_left = gap_index != 0;
+                const bool has_right = gap_index != segment.occupied.size();
+                const auto gap_begin = has_left ? segment.occupied[gap_index - 1].end : 0U;
+                const auto gap_end =
+                    has_right ? segment.occupied[gap_index].begin : config.alignment;
+                const auto usable_begin = gap_begin + (has_left ? guard_bytes : 0U);
+                const auto usable_end = gap_end -
+                    ((has_right && gap_end != 0) ? guard_bytes : 0U);
+                if (usable_end < usable_begin ||
+                    tail_bytes > usable_end - usable_begin) {
+                    continue;
+                }
+
+                std::size_t offset = usable_begin;
+                if (has_left && !has_right) {
+                    offset = usable_end - tail_bytes;
+                } else if (has_left && has_right) {
+                    offset = usable_begin +
+                             (usable_end - usable_begin - tail_bytes) / 2U;
+                }
+                const auto left_distance =
+                    has_left ? offset - gap_begin : config.alignment;
+                const auto right_distance =
+                    has_right ? gap_end - (offset + tail_bytes) : config.alignment;
+                const auto distance = std::min(left_distance, right_distance);
+                if (!best.found || distance > best.distance) {
+                    best = {segment_index, offset, distance, true};
+                }
+            }
+        }
+
+        std::uint64_t tail_address = 0;
+        std::size_t tail_offset = 0;
+        if (best.found) {
+            auto& segment = padding_segments[best.segment];
+            tail_offset = best.offset;
+            tail_address = segment.base + tail_offset;
+            segment.occupied.push_back({tail_offset, tail_offset + tail_bytes});
+            std::sort(segment.occupied.begin(), segment.occupied.end(),
+                      [](const auto& left, const auto& right) {
+                          return left.begin < right.begin;
+                      });
+        } else {
+            cursor = align_up(cursor, config.alignment);
+            tail_address = cursor;
+            padding_segments.push_back({cursor, {{0, tail_bytes}}});
+            cursor += config.alignment;
+        }
+
+        const auto tail_region =
+            (tail_address - config.base_address) / config.metadata_granularity;
+        if (full_bytes == 0) {
+            entry.physical_address = tail_address;
+            entry.metadata_region = tail_region;
+            entry.segment_offset = tail_offset;
+        } else {
+            entry.tail_address = tail_address;
+            entry.tail_metadata_region = tail_region;
+            entry.tail_offset = tail_offset;
+            entry.tail_bytes = tail_bytes;
+        }
+    }
+
+    finish_layout(layout, config.base_address, cursor, config);
+    return layout;
+}
+
 MccLayout place_blocks_in_memory(const std::vector<Block>& blocks, const Model& model,
                                  MccConfig config) {
     validate_model(model);
@@ -277,6 +489,12 @@ MccLayout place_stored_blocks_in_memory(const std::vector<std::size_t>& stored_s
     }
     if (config.placement_mode == MccPlacementMode::TailSplitV3) {
         return place_tail_split_v3(stored_sizes, block_size, config);
+    }
+    if (config.placement_mode == MccPlacementMode::TwoEndedTailV4) {
+        return place_two_ended_tail_v4(stored_sizes, block_size, config);
+    }
+    if (config.placement_mode == MccPlacementMode::SpacedPaddingV5) {
+        return place_spaced_padding_v5(stored_sizes, block_size, config);
     }
 
     MccLayout layout;
