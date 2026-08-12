@@ -40,7 +40,8 @@ $streamArgs = @(
 )
 if ($RoundTrip) { $streamArgs += "-RoundTrip" }
 if ($Resume) { $streamArgs += "-Resume" }
-& powershell @streamArgs | Set-Content (Join-Path $out "fpc-training-evaluation.log")
+$powerShellHost = (Get-Process -Id $PID).Path
+& $powerShellHost @streamArgs | Set-Content (Join-Path $out "fpc-training-evaluation.log")
 if ($LASTEXITCODE -ne 0) { throw "FPC budget sweep failed" }
 
 function Parse-Values([string]$line) {

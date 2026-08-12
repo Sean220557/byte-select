@@ -437,3 +437,19 @@ generated SystemVerilog. This verifies pattern priority, byte dictionaries,
 metadata target tags, invalid metadata rejection, and top-level selection of
 the smallest successful target. Set `-DBSEL_ENABLE_RTL_SIM=OFF` when a build
 environment intentionally has no simulator.
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+
+cmake -S fpc-bsel.v2 -B fpc-bsel.v2/build -DCMAKE_BUILD_TYPE=Release
+cmake --build fpc-bsel.v2/build -j
+
+chmod +x tools/run_final_compression_mcc.sh
+
+./tools/run_final_compression_mcc.sh \
+  --input /data/dataset-20g.bin \
+  --train-percent 20 \
+  --output-dir results/final-20g \
+  --chunk-mib 256 \
+  --roundtrip \
+  --resume

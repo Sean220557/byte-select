@@ -38,3 +38,26 @@ powershell -File tools/run_final_compression_mcc.ps1 `
 so chunk-boundary padding is conservatively charged. Larger chunks reduce this
 boundary effect. `-Resume` reuses completed FPC models and evaluation logs;
 the final MCC pass is rerun from the start.
+
+## Linux
+
+The native Bash runner has no PowerShell dependency:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+cmake -S fpc-bsel.v2 -B fpc-bsel.v2/build -DCMAKE_BUILD_TYPE=Release
+cmake --build fpc-bsel.v2/build -j
+
+chmod +x tools/run_final_compression_mcc.sh
+tools/run_final_compression_mcc.sh \
+  --input /data/dataset-20g.bin \
+  --train-percent 20 \
+  --output-dir results/final-20g \
+  --chunk-mib 256 \
+  --roundtrip \
+  --resume
+```
+
+The Linux runner uses GNU `stat`, `dd`, and `awk`. It streams the test range in
+chunks and does not create a second full-size dataset copy.
