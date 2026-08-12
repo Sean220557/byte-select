@@ -23,6 +23,8 @@ struct MccConfig {
     std::size_t metadata_granularity = 4096;
     bool fill_padding = true;
     MccPlacementMode placement_mode = MccPlacementMode::RegionFfdV2;
+    std::size_t guard_bytes = 1;
+    std::size_t region_lookback = 0;
 };
 
 struct MccEntry {
@@ -48,6 +50,8 @@ struct MccStats {
     std::uint64_t padding_bytes = 0;
     std::uint64_t physical_bytes = 0;
     std::uint64_t metadata_regions = 0;
+    std::uint64_t candidate_segments_scanned = 0;
+    std::uint64_t candidate_gaps_scanned = 0;
 
     double quantized_compression_ratio() const;
     double storage_ratio() const;

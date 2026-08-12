@@ -14,15 +14,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
-$out = [IO.Path]::GetFullPath((Join-Path $repo $OutputDir))
-$fpc = [IO.Path]::GetFullPath((Join-Path $repo $FpcExe))
-$bsel = [IO.Path]::GetFullPath((Join-Path $repo $BselExe))
+function Resolve-RepoPath([string]$path) {
+    if ([IO.Path]::IsPathRooted($path)) { return [IO.Path]::GetFullPath($path) }
+    return [IO.Path]::GetFullPath((Join-Path $repo $path))
+}
+$out = Resolve-RepoPath $OutputDir
+$fpc = Resolve-RepoPath $FpcExe
+$bsel = Resolve-RepoPath $BselExe
 New-Item -ItemType Directory -Force $out | Out-Null
 
 [uint64]$trainOffset = 0; [uint64]$testOffset = 0
 [uint64]$trainLength = 0; [uint64]$testLength = 0
 if ($Dataset.Length -ne 0) {
-    $inputPath = [IO.Path]::GetFullPath((Join-Path $repo $Dataset))
+    $inputPath = Resolve-RepoPath $Dataset
     if (!(Test-Path -LiteralPath $inputPath -PathType Leaf)) { throw "missing file: $inputPath" }
     [uint64]$totalBytes = (Get-Item -LiteralPath $inputPath).Length
     if ($totalBytes % 256 -ne 0) { throw "single input size must be a multiple of 256B" }
@@ -35,8 +39,8 @@ if ($Dataset.Length -ne 0) {
     if ($Train.Length -eq 0 -or $Test.Length -eq 0) {
         throw "provide either -Input or both -Train and -Test"
     }
-    $trainPath = [IO.Path]::GetFullPath((Join-Path $repo $Train))
-    $testPath = [IO.Path]::GetFullPath((Join-Path $repo $Test))
+    $trainPath = Resolve-RepoPath $Train
+    $testPath = Resolve-RepoPath $Test
     $trainLength = (Get-Item -LiteralPath $trainPath).Length
     $testLength = (Get-Item -LiteralPath $testPath).Length
 }

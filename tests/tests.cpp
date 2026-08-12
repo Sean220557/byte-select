@@ -578,6 +578,25 @@ void test_mcc_layout() {
           "MCC v5 places an intact third tail in the middle padding with spacing");
     check(tail_v5.stats.stored_bytes == 33 && tail_v5.stats.physical_bytes == 64,
           "MCC v5 reuses middle padding instead of opening another segment");
+    const std::vector<std::size_t> guard_records{32, 32};
+    const auto no_guard = bsel::place_stored_blocks_in_memory(
+        guard_records, 256,
+        {0, 64, 4096, true, bsel::MccPlacementMode::SpacedPaddingV5, 0});
+    const auto one_byte_guard = bsel::place_stored_blocks_in_memory(
+        guard_records, 256,
+        {0, 64, 4096, true, bsel::MccPlacementMode::SpacedPaddingV5, 1});
+    check(no_guard.stats.physical_bytes == 64 &&
+              one_byte_guard.stats.physical_bytes == 128,
+          "MCC v5.1 guard setting exposes the density and isolation tradeoff");
+    const std::vector<std::size_t> lookback_records{40, 40, 40, 24};
+    const auto no_lookback = bsel::place_stored_blocks_in_memory(
+        lookback_records, 256,
+        {0, 64, 128, true, bsel::MccPlacementMode::SpacedPaddingV5, 1, 0});
+    const auto one_region_lookback = bsel::place_stored_blocks_in_memory(
+        lookback_records, 256,
+        {0, 64, 128, true, bsel::MccPlacementMode::SpacedPaddingV5, 1, 1});
+    check(one_region_lookback.stats.physical_bytes <= no_lookback.stats.physical_bytes,
+          "MCC v5.3 bounded lookback never loses an eligible local placement");
 }
 
 void test_rtl_generation() {

@@ -150,6 +150,15 @@ std::size_t full_block_count(const std::string& path, std::size_t block_size) {
     return static_cast<std::size_t>(bytes) / block_size;
 }
 
+std::size_t parse_nonnegative_size(const std::string& text, const std::string& name) {
+    std::size_t consumed = 0;
+    const auto value = std::stoull(text, &consumed);
+    if (consumed != text.size() || value > std::numeric_limits<std::size_t>::max()) {
+        throw std::invalid_argument("invalid " + name + ": " + text);
+    }
+    return static_cast<std::size_t>(value);
+}
+
 template <typename Function>
 void visit_full_blocks(const std::string& path, std::size_t block_size, Function&& function) {
     std::ifstream input(path, std::ios::binary);
@@ -1260,7 +1269,7 @@ void command_patterns(int argc, char** argv) {
 
 void command_mcc(int argc, char** argv) {
     if (argc < 4) {
-        throw std::runtime_error("usage: bsel mcc MODEL INPUT [--base N] [--alignment N] [--metadata-granularity N] [--placement aligned|segment-v1|region-ffd-v2|tail-split-v3|two-ended-tail-v4|spaced-padding-v5] [--limit N] [--no-fill-padding]");
+        throw std::runtime_error("usage: bsel mcc MODEL INPUT [--base N] [--alignment N] [--metadata-granularity N] [--guard-bytes N] [--region-lookback N] [--placement aligned|segment-v1|region-ffd-v2|tail-split-v3|two-ended-tail-v4|spaced-padding-v5] [--limit N] [--no-fill-padding]");
     }
     bsel::MccConfig config;
     std::size_t limit = std::numeric_limits<std::size_t>::max();
@@ -1272,6 +1281,10 @@ void command_mcc(int argc, char** argv) {
             config.alignment = parse_size(argv[++i], "alignment");
         } else if (option == "--metadata-granularity" && i + 1 < argc) {
             config.metadata_granularity = parse_size(argv[++i], "metadata granularity");
+        } else if (option == "--guard-bytes" && i + 1 < argc) {
+            config.guard_bytes = parse_nonnegative_size(argv[++i], "guard bytes");
+        } else if (option == "--region-lookback" && i + 1 < argc) {
+            config.region_lookback = parse_nonnegative_size(argv[++i], "region lookback");
         } else if (option == "--placement" && i + 1 < argc) {
             const std::string mode = argv[++i];
             if (mode == "aligned") {
@@ -1313,6 +1326,9 @@ void command_mcc(int argc, char** argv) {
               << " padding_bytes=" << layout.stats.padding_bytes
               << " physical_bytes=" << layout.stats.physical_bytes
               << " metadata_regions=" << layout.stats.metadata_regions
+              << " candidate_segments_scanned="
+              << layout.stats.candidate_segments_scanned
+              << " candidate_gaps_scanned=" << layout.stats.candidate_gaps_scanned
               << " quantized_ratio=" << layout.stats.quantized_compression_ratio() << '\n';
     const auto count = std::min(limit, layout.entries.size());
     for (std::size_t i = 0; i < count; ++i) {
@@ -1385,12 +1401,15 @@ void print_mcc_layout_summary(const std::string& label, const bsel::MccLayout& l
               << " padding_bytes=" << layout.stats.padding_bytes
               << " physical_bytes=" << layout.stats.physical_bytes
               << " metadata_regions=" << layout.stats.metadata_regions
+              << " candidate_segments_scanned="
+              << layout.stats.candidate_segments_scanned
+              << " candidate_gaps_scanned=" << layout.stats.candidate_gaps_scanned
               << " quantized_ratio=" << layout.stats.quantized_compression_ratio() << '\n';
 }
 
 void command_mcc_sizes(int argc, char** argv) {
     if (argc < 4) {
-        throw std::runtime_error("usage: bsel mcc-sizes SIZE_LIST BLOCK_SIZE [--base N] [--alignment N] [--metadata-granularity N]");
+        throw std::runtime_error("usage: bsel mcc-sizes SIZE_LIST BLOCK_SIZE [--base N] [--alignment N] [--metadata-granularity N] [--guard-bytes N] [--region-lookback N]");
     }
     const auto sizes = read_size_list(argv[2]);
     const auto block_size = parse_size(argv[3], "block size");
@@ -1403,6 +1422,10 @@ void command_mcc_sizes(int argc, char** argv) {
             config.alignment = parse_size(argv[++i], "alignment");
         } else if (option == "--metadata-granularity" && i + 1 < argc) {
             config.metadata_granularity = parse_size(argv[++i], "metadata granularity");
+        } else if (option == "--guard-bytes" && i + 1 < argc) {
+            config.guard_bytes = parse_nonnegative_size(argv[++i], "guard bytes");
+        } else if (option == "--region-lookback" && i + 1 < argc) {
+            config.region_lookback = parse_nonnegative_size(argv[++i], "region lookback");
         } else {
             throw std::runtime_error("unknown or incomplete option: " + option);
         }
@@ -1438,6 +1461,50 @@ void command_mcc_sizes(int argc, char** argv) {
     print_mcc_layout_summary(
         "mcc_sizes_v5",
         bsel::place_stored_blocks_in_memory(sizes, block_size, v5_config));
+}
+
+void command_mcc_baseline(int argc, char** argv) {
+    if (argc < 5) {
+        throw std::runtime_error(
+            "usage: bsel mcc-baseline BASELINE INPUT BLOCK_SIZE "
+            "[--guard-bytes N] [--region-lookback N]");
+    }
+    const auto kind = bsel::parse_baseline_kind(argv[2]);
+    const auto block_size = parse_size(argv[4], "block size");
+    bsel::MccConfig config;
+    for (int i = 5; i < argc; ++i) {
+        const std::string option = argv[i];
+        if (option == "--guard-bytes" && i + 1 < argc) {
+            config.guard_bytes = parse_nonnegative_size(argv[++i], "guard bytes");
+        } else if (option == "--region-lookback" && i + 1 < argc) {
+            config.region_lookback = parse_nonnegative_size(argv[++i], "region lookback");
+        } else {
+            throw std::runtime_error("unknown or incomplete option: " + option);
+        }
+    }
+    const auto blocks = split_blocks(read_bytes(argv[3]), block_size, false);
+    if (blocks.empty()) throw std::runtime_error("baseline input has no full blocks");
+    const auto sizes = baseline_stored_sizes(blocks, kind);
+    auto before = config;
+    before.fill_padding = false;
+    before.placement_mode = bsel::MccPlacementMode::AlignedRecords;
+    auto v1 = config; v1.placement_mode = bsel::MccPlacementMode::SegmentPackingV1;
+    auto v2 = config; v2.placement_mode = bsel::MccPlacementMode::RegionFfdV2;
+    auto v3 = config; v3.placement_mode = bsel::MccPlacementMode::TailSplitV3;
+    auto v4 = config; v4.placement_mode = bsel::MccPlacementMode::TwoEndedTailV4;
+    auto v5 = config; v5.placement_mode = bsel::MccPlacementMode::SpacedPaddingV5;
+    print_mcc_layout_summary("mcc_sizes_before",
+        bsel::place_stored_blocks_in_memory(sizes, block_size, before));
+    print_mcc_layout_summary("mcc_sizes_v1",
+        bsel::place_stored_blocks_in_memory(sizes, block_size, v1));
+    print_mcc_layout_summary("mcc_sizes_v2",
+        bsel::place_stored_blocks_in_memory(sizes, block_size, v2));
+    print_mcc_layout_summary("mcc_sizes_v3",
+        bsel::place_stored_blocks_in_memory(sizes, block_size, v3));
+    print_mcc_layout_summary("mcc_sizes_v4",
+        bsel::place_stored_blocks_in_memory(sizes, block_size, v4));
+    print_mcc_layout_summary("mcc_sizes_v5",
+        bsel::place_stored_blocks_in_memory(sizes, block_size, v5));
 }
 
 void print_mcc_comparison_row(const std::string& algorithm,
@@ -1658,6 +1725,7 @@ void print_usage() {
         << "  bsel mcc-compare MODEL INPUT [--base N] [--alignment N]\n"
         << "                   [--metadata-granularity N]\n"
         << "  bsel mcc-sizes SIZE_LIST BLOCK_SIZE [--base N] [--alignment N]\n"
+        << "  bsel mcc-baseline BASELINE INPUT BLOCK_SIZE [--guard-bytes N] [--region-lookback N]\n"
         << "                 [--metadata-granularity N]\n"
         << "  bsel generate-rtl MODEL OUTPUT_DIRECTORY\n";
 }
@@ -1705,6 +1773,8 @@ int main(int argc, char** argv) {
             command_mcc_compare(argc, argv);
         } else if (command == "mcc-sizes") {
             command_mcc_sizes(argc, argv);
+        } else if (command == "mcc-baseline") {
+            command_mcc_baseline(argc, argv);
         } else if (command == "generate-rtl") {
             command_generate_rtl(argc, argv);
         } else {

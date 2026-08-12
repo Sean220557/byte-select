@@ -3,6 +3,8 @@
 #include <limits>
 #include <stdexcept>
 #include <algorithm>
+#include <array>
+#include <set>
 #include <vector>
 
 namespace bsel {
@@ -49,7 +51,32 @@ struct OccupiedRange {
 struct SpacedSegment {
     std::uint64_t base = 0;
     std::vector<OccupiedRange> occupied;
+    std::size_t largest_gap = 0;
 };
+
+std::size_t gap_size_class(std::size_t bytes) {
+    if (bytes <= 4) return 0;
+    if (bytes <= 8) return 1;
+    if (bytes <= 16) return 2;
+    if (bytes <= 32) return 3;
+    return 4;
+}
+
+std::size_t largest_spaced_gap(const SpacedSegment& segment,
+                               std::size_t alignment,
+                               std::size_t guard_bytes) {
+    std::size_t largest = 0;
+    for (std::size_t i = 0; i <= segment.occupied.size(); ++i) {
+        const bool has_left = i != 0;
+        const bool has_right = i != segment.occupied.size();
+        const auto begin = has_left ? segment.occupied[i - 1].end + guard_bytes : 0U;
+        const auto raw_end = has_right ? segment.occupied[i].begin : alignment;
+        const auto end = has_right && raw_end >= guard_bytes
+            ? raw_end - guard_bytes : raw_end;
+        if (end >= begin) largest = std::max(largest, end - begin);
+    }
+    return largest;
+}
 
 struct PendingRecord {
     std::size_t index = 0;
@@ -333,7 +360,7 @@ MccLayout place_two_ended_tail_v4(const std::vector<std::size_t>& stored_sizes,
 
 MccLayout place_spaced_padding_v5(const std::vector<std::size_t>& stored_sizes,
                                   std::size_t block_size, MccConfig config) {
-    constexpr std::size_t guard_bytes = 1;
+    const auto guard_bytes = config.guard_bytes;
     struct Candidate {
         std::size_t segment = 0;
         std::size_t offset = 0;
@@ -345,6 +372,7 @@ MccLayout place_spaced_padding_v5(const std::vector<std::size_t>& stored_sizes,
     layout.entries.resize(stored_sizes.size());
     std::uint64_t cursor = align_up(config.base_address, config.alignment);
     std::vector<SpacedSegment> padding_segments;
+    std::vector<std::array<std::set<std::size_t>, 5>> region_classes;
 
     for (std::size_t i = 0; i < stored_sizes.size(); ++i) {
         const auto stored_bytes = stored_sizes[i];
@@ -373,15 +401,26 @@ MccLayout place_spaced_padding_v5(const std::vector<std::size_t>& stored_sizes,
         Candidate best;
         const auto active_region =
             (cursor - config.base_address) / config.metadata_granularity;
-        for (std::size_t segment_index = 0;
-             segment_index < padding_segments.size(); ++segment_index) {
-            const auto& segment = padding_segments[segment_index];
-            if ((segment.base - config.base_address) /
-                    config.metadata_granularity != active_region) {
-                continue;
+        std::vector<std::size_t> candidates;
+        const auto first_region = active_region > config.region_lookback
+            ? active_region - config.region_lookback : 0U;
+        const auto minimum_class = gap_size_class(tail_bytes);
+        for (auto region = first_region;
+             region <= active_region && region < region_classes.size(); ++region) {
+            for (auto size_class = minimum_class; size_class < 5; ++size_class) {
+                candidates.insert(candidates.end(),
+                                  region_classes[region][size_class].begin(),
+                                  region_classes[region][size_class].end());
             }
+        }
+        std::sort(candidates.begin(), candidates.end());
+        candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+        for (const auto segment_index : candidates) {
+            const auto& segment = padding_segments[segment_index];
+            ++layout.stats.candidate_segments_scanned;
             for (std::size_t gap_index = 0;
                  gap_index <= segment.occupied.size(); ++gap_index) {
+                ++layout.stats.candidate_gaps_scanned;
                 const bool has_left = gap_index != 0;
                 const bool has_right = gap_index != segment.occupied.size();
                 const auto gap_begin = has_left ? segment.occupied[gap_index - 1].end : 0U;
@@ -417,6 +456,9 @@ MccLayout place_spaced_padding_v5(const std::vector<std::size_t>& stored_sizes,
         std::size_t tail_offset = 0;
         if (best.found) {
             auto& segment = padding_segments[best.segment];
+            const auto region = (segment.base - config.base_address) /
+                                config.metadata_granularity;
+            region_classes[region][gap_size_class(segment.largest_gap)].erase(best.segment);
             tail_offset = best.offset;
             tail_address = segment.base + tail_offset;
             segment.occupied.push_back({tail_offset, tail_offset + tail_bytes});
@@ -424,10 +466,26 @@ MccLayout place_spaced_padding_v5(const std::vector<std::size_t>& stored_sizes,
                       [](const auto& left, const auto& right) {
                           return left.begin < right.begin;
                       });
+            segment.largest_gap = largest_spaced_gap(
+                segment, config.alignment, guard_bytes);
+            if (segment.largest_gap != 0) {
+                region_classes[region][gap_size_class(segment.largest_gap)].insert(best.segment);
+            }
         } else {
             cursor = align_up(cursor, config.alignment);
             tail_address = cursor;
-            padding_segments.push_back({cursor, {{0, tail_bytes}}});
+            const auto region = (cursor - config.base_address) /
+                                config.metadata_granularity;
+            if (region_classes.size() <= region) region_classes.resize(region + 1);
+            SpacedSegment segment{cursor, {{0, tail_bytes}}, 0};
+            segment.largest_gap = largest_spaced_gap(
+                segment, config.alignment, guard_bytes);
+            const auto segment_index = padding_segments.size();
+            padding_segments.push_back(std::move(segment));
+            if (padding_segments.back().largest_gap != 0) {
+                region_classes[region][gap_size_class(
+                    padding_segments.back().largest_gap)].insert(segment_index);
+            }
             cursor += config.alignment;
         }
 
