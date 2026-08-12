@@ -11,6 +11,14 @@ real stored sizes for 256B sublines and is evaluated through MCC before packing,
 v1, v2, v3, v4, and v5. The recommended v5 point uses a 1B guard and one-region
 lookback.
 
+All algorithms use the same 256B decision and raw-fallback granularity. FPC-BSEL
+retains four internal 64B FPC lanes for implementation parallelism, but the
+four lane modes are packed into one shared byte, the lane payloads are joined,
+and raw fallback is selected once for the complete 256B subline. Therefore its
+stored size is `min(256, 1 + sum(four lane payloads))`, rather than the older
+sum of four independently selected 64B records. `sizes-256 --roundtrip` checks
+every internal lane while generating these sizes.
+
 The selected ablation algorithm defaults to FPC-BSEL 3KiB. It is additionally
 evaluated with guard 0/1 and region lookback 0/1/2. Candidate segment and gap
 checks are recorded alongside quantized ratios.

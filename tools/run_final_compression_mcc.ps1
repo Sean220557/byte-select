@@ -86,27 +86,6 @@ function Add-Mcc($acc, $lines) {
     ++$acc.chunks
 }
 
-function Export-FpcSizes([string]$container, [string]$sizesPath) {
-    $bytes = [IO.File]::ReadAllBytes($container)
-    if ([Text.Encoding]::ASCII.GetString($bytes, 0, 7) -ne "FPCBSF1") {
-        throw "invalid FPC container"
-    }
-    $writer = [IO.StreamWriter]::new($sizesPath, $false)
-    try {
-        $offset = 16; $sum = 0; $count = 0
-        while ($offset -lt $bytes.Length) {
-            $size = [int]$bytes[$offset] -bor ([int]$bytes[$offset + 1] -shl 8)
-            $offset += 2
-            if ($offset + $size -gt $bytes.Length) { throw "truncated FPC container" }
-            $offset += $size; $sum += $size; ++$count
-            if ($count -eq 4) {
-                $writer.WriteLine([Math]::Min($sum, 256)); $sum = 0; $count = 0
-            }
-        }
-        if ($count -ne 0) { throw "incomplete 256B FPC subline" }
-    } finally { $writer.Dispose() }
-}
-
 $algorithms = @(
     @{ Name = "fpc-bsel-4k"; Type = "fpc"; Model = "fpc-4k.model" },
     @{ Name = "fpc-bsel-3k"; Type = "fpc"; Model = "fpc-3k.model" },
@@ -147,11 +126,11 @@ try {
         foreach ($algorithm in $algorithms) {
             if ($algorithm.Type -eq "fpc") {
                 $model = Join-Path $fpcResults $algorithm.Model
-                $container = Join-Path $temp "chunk.fpz"
                 $sizes = Join-Path $temp "chunk.sizes.txt"
-                & $fpc compress $model $raw $container | Out-Null
-                if ($LASTEXITCODE -ne 0) { throw "FPC compression failed: $($algorithm.Name)" }
-                Export-FpcSizes $container $sizes
+                $sizeArgs = @("sizes-256", $model, $raw, $sizes)
+                if ($RoundTrip) { $sizeArgs += "--roundtrip" }
+                & $fpc @sizeArgs | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "FPC 256B sizing failed: $($algorithm.Name)" }
                 $mcc = & $bsel mcc-sizes $sizes 256 --guard-bytes 1 --region-lookback 1
             } else {
                 $mcc = & $bsel mcc-baseline $algorithm.Kind $raw 256 `
@@ -183,11 +162,11 @@ try {
 }
 
 $summary = Join-Path $out "final-summary.csv"
-Set-Content $summary "algorithm,original_bytes,stored_bytes,algorithm_ratio,before_ratio,v1_ratio,v2_ratio,v3_ratio,v4_ratio,v5_ratio,v5_physical_bytes,v5_metadata_regions,candidate_segments,candidate_gaps,chunks"
+Set-Content $summary "algorithm,subline_bytes,original_bytes,stored_bytes,algorithm_ratio,before_ratio,v1_ratio,v2_ratio,v3_ratio,v4_ratio,v5_ratio,v5_physical_bytes,v5_metadata_regions,candidate_segments,candidate_gaps,chunks"
 foreach ($algorithm in $algorithms) {
     $a = $totals[$algorithm.Name]
     $ratio = { param($bytes) if ($bytes -eq 0) { 0 } else { [double]$a.original / $bytes } }
-    $row = $algorithm.Name,$a.original,$a.stored,(& $ratio $a.stored),`
+    $row = $algorithm.Name,256,$a.original,$a.stored,(& $ratio $a.stored),`
         (& $ratio $a.before),(& $ratio $a.v1),(& $ratio $a.v2),`
         (& $ratio $a.v3),(& $ratio $a.v4),(& $ratio $a.v5),`
         $a.v5,$a.v5_regions,$a.candidate_segments,$a.candidate_gaps,$a.chunks
