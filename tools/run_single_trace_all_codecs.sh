@@ -5,14 +5,16 @@ usage() {
   cat >&2 <<'EOF'
 usage: tools/run_single_trace_all_codecs.sh DATASET_FILE_OR_DIR OUTPUT_DIR
 
-Runs every standalone codec variant and all main-project baselines on one
-binary trace file. If the input is a directory, every regular file directly
-under it is treated as a dataset and run in parallel. Inputs are truncated to
-a 64-byte block boundary, split into train/test, then verified with roundtrip
-+ optional compress/decompress + sha256.
+By default, builds the required Linux binaries and runs the complete 256B
+compression + MCC experiment. If the input is a directory, every regular file
+directly under it is treated as a dataset and run in parallel.
 
 Environment variables:
-  TRAIN_PERCENT   train split percentage, integer 1..99 (default: 90)
+  EXPERIMENT_MODE final-mcc (default) or legacy-standalone
+  TRAIN_PERCENT   train split percentage, integer 1..99 (default: 20)
+  CHUNK_MIB       streaming chunk size for final-mcc (default: 256)
+  ROUNDTRIP       set to 1 to verify FPC-BSEL decoding (default: 1)
+  RESUME          set to 1 to reuse trained models/logs (default: 1)
   MAX_PATTERNS    BSEL patterns for standalone variants (default: 256)
   BSEL_PRESET     main BSEL preset for baseline compare
                   (default: bsel-1024-1024-128)
@@ -26,11 +28,12 @@ Environment variables:
   SKIP_BUILD      set to 1 to skip CMake builds
 
 Example:
-  TRAIN_PERCENT=90 MAX_PATTERNS=256 \
-    TRAIN_BLOCK_LIMIT=10000000 TEST_BLOCK_LIMIT=1000000 \
-    bash tools/run_single_trace_all_codecs.sh \
-      /data/flink.delete_hole.log \
-      results/delete-hole-all
+  bash tools/run_single_trace_all_codecs.sh \
+    /data/dataset-20g.bin results/final-20g
+
+Legacy standalone comparison:
+  EXPERIMENT_MODE=legacy-standalone TRAIN_PERCENT=90 \
+    bash tools/run_single_trace_all_codecs.sh DATASET OUTPUT_DIR
 EOF
 }
 
@@ -41,7 +44,11 @@ fi
 
 input_path=$(realpath "$1")
 out_dir=$2
-train_percent=${TRAIN_PERCENT:-90}
+experiment_mode=${EXPERIMENT_MODE:-final-mcc}
+train_percent=${TRAIN_PERCENT:-20}
+chunk_mib=${CHUNK_MIB:-256}
+roundtrip=${ROUNDTRIP:-1}
+resume=${RESUME:-1}
 max_patterns=${MAX_PATTERNS:-256}
 bsel_preset=${BSEL_PRESET:-bsel-1024-1024-128}
 skip_build=${SKIP_BUILD:-0}
@@ -49,6 +56,11 @@ train_block_limit=${TRAIN_BLOCK_LIMIT:-0}
 test_block_limit=${TEST_BLOCK_LIMIT:-0}
 verify_compress=${VERIFY_COMPRESS:-0}
 dataset_jobs=${DATASET_JOBS:-2}
+
+if [[ "$experiment_mode" != "final-mcc" && "$experiment_mode" != "legacy-standalone" ]]; then
+  echo "EXPERIMENT_MODE must be final-mcc or legacy-standalone" >&2
+  exit 2
+fi
 
 if ! [[ "$train_percent" =~ ^[0-9]+$ ]] || (( train_percent < 1 || train_percent > 99 )); then
   echo "TRAIN_PERCENT must be an integer in 1..99" >&2
@@ -70,21 +82,42 @@ if ! [[ "$dataset_jobs" =~ ^[0-9]+$ ]] || (( dataset_jobs < 1 )); then
   echo "DATASET_JOBS must be a positive integer" >&2
   exit 2
 fi
+if ! [[ "$chunk_mib" =~ ^[0-9]+$ ]] || (( chunk_mib < 1 )); then
+  echo "CHUNK_MIB must be a positive integer" >&2
+  exit 2
+fi
+if [[ "$roundtrip" != "0" && "$roundtrip" != "1" ]]; then
+  echo "ROUNDTRIP must be 0 or 1" >&2
+  exit 2
+fi
+if [[ "$resume" != "0" && "$resume" != "1" ]]; then
+  echo "RESUME must be 0 or 1" >&2
+  exit 2
+fi
 [[ -e "$input_path" ]] || { echo "missing input: $input_path" >&2; exit 2; }
 
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+main_build_dir="$repo_dir/build-linux-release"
+fpc_v2_build_dir="$repo_dir/fpc-bsel.v2/build-linux-release"
 mkdir -p "$out_dir"
 out_dir=$(realpath "$out_dir")
 
 if [[ "$skip_build" != "1" ]]; then
   export CXXFLAGS="${CXXFLAGS:-} -O3 -DNDEBUG"
   export CFLAGS="${CFLAGS:-} -O3 -DNDEBUG"
-  cmake -S "$repo_dir" -B "$repo_dir/build-release" -G Ninja -DCMAKE_BUILD_TYPE=Release
-  cmake --build "$repo_dir/build-release" -j
+  cmake -S "$repo_dir" -B "$main_build_dir" -G Ninja -DCMAKE_BUILD_TYPE=Release
+  cmake --build "$main_build_dir" -j
+  (cd "$main_build_dir" && ctest --output-on-failure)
 
-  for dir in fpc-bsel fpc-bsel.v1 fpc-bsel.v2 cpack-bsel cpack-bsel.v1 cpack-bsel.v2; do
-    cmake -S "$repo_dir/$dir" -B "$repo_dir/$dir/build" -G Ninja -DCMAKE_BUILD_TYPE=Release
-    cmake --build "$repo_dir/$dir/build" -j
+  codec_dirs=(fpc-bsel.v2)
+  if [[ "$experiment_mode" == "legacy-standalone" ]]; then
+    codec_dirs=(fpc-bsel fpc-bsel.v1 fpc-bsel.v2 cpack-bsel cpack-bsel.v1 cpack-bsel.v2)
+  fi
+  for dir in "${codec_dirs[@]}"; do
+    build_dir="$repo_dir/$dir/build-linux-release"
+    cmake -S "$repo_dir/$dir" -B "$build_dir" -G Ninja -DCMAKE_BUILD_TYPE=Release
+    cmake --build "$build_dir" -j
+    (cd "$build_dir" && ctest --output-on-failure)
   done
 fi
 
@@ -126,7 +159,21 @@ fi
 
 dataset="$input_path"
 
-bsel="$repo_dir/build-release/bsel"
+if [[ "$experiment_mode" == "final-mcc" ]]; then
+  final_args=(
+    --input "$dataset"
+    --train-percent "$train_percent"
+    --output-dir "$out_dir"
+    --chunk-mib "$chunk_mib"
+    --fpc-exe "$fpc_v2_build_dir/fpc-bsel-v2"
+    --bsel-exe "$main_build_dir/bsel"
+  )
+  ((roundtrip)) && final_args+=(--roundtrip)
+  ((resume)) && final_args+=(--resume)
+  exec bash "$repo_dir/tools/run_final_compression_mcc.sh" "${final_args[@]}"
+fi
+
+bsel="$main_build_dir/bsel"
 [[ -x "$bsel" ]] || { echo "missing executable: $bsel" >&2; exit 2; }
 
 trace_dir="$out_dir/prepared"
@@ -277,12 +324,12 @@ run_codec() {
     "$prefix" "$residual" "$raw_bsel" "$inline" >> "$summary_csv"
 }
 
-run_codec fpc-bsel original "$repo_dir/fpc-bsel/build/fpc-bsel"
-run_codec fpc-bsel v1 "$repo_dir/fpc-bsel.v1/build/fpc-bsel-v1"
-run_codec fpc-bsel v2 "$repo_dir/fpc-bsel.v2/build/fpc-bsel-v2"
-run_codec cpack-bsel original "$repo_dir/cpack-bsel/build/cpack-bsel"
-run_codec cpack-bsel v1 "$repo_dir/cpack-bsel.v1/build/cpack-bsel-v1"
-run_codec cpack-bsel v2 "$repo_dir/cpack-bsel.v2/build/cpack-bsel-v2"
+run_codec fpc-bsel original "$repo_dir/fpc-bsel/build-linux-release/fpc-bsel"
+run_codec fpc-bsel v1 "$repo_dir/fpc-bsel.v1/build-linux-release/fpc-bsel-v1"
+run_codec fpc-bsel v2 "$repo_dir/fpc-bsel.v2/build-linux-release/fpc-bsel-v2"
+run_codec cpack-bsel original "$repo_dir/cpack-bsel/build-linux-release/cpack-bsel"
+run_codec cpack-bsel v1 "$repo_dir/cpack-bsel.v1/build-linux-release/cpack-bsel-v1"
+run_codec cpack-bsel v2 "$repo_dir/cpack-bsel.v2/build-linux-release/cpack-bsel-v2"
 
 bsel_model="$out_dir/bsel-${bsel_preset}.model"
 echo "[run] baseline bsel train"

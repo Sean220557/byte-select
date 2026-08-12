@@ -259,17 +259,15 @@ The paper's Figure 11/12 evaluate the generated algorithms against FPC, BDI,
 C-Pack, and BPC on CPU and GPU memory traces. Those traces come from SPEC,
 LULESH, Rodinia, and in-house GPU simulators and are not redistributable, so
 this repository reproduces the *algorithm-side* comparison end-to-end on
-representative graph-workload data instead: `tools/run_gapbs_demo.sh` dumps the
-CSR arrays (vertex offsets + neighbor IDs) of GAP Benchmark Suite graphs as raw
-64-byte cache-line traces, trains the paper's three presets on 90% of each
-trace, and compares their quantized compression ratios against the five
-baseline codecs on the held-out middle 10% (the paper's holdout rule).
+representative graph-workload data instead. `tools/gapbs_dump_trace.cc` can be
+built against GAPBS to dump CSR arrays as raw traces; the resulting aligned
+trace can then be passed to the unified experiment runner.
 
 ```bash
-./tools/run_gapbs_demo.sh /tmp/bsel-demo
+./tools/run_single_trace_all_codecs.sh /data/gapbs.trace results/gapbs
 ```
 
-The script builds `tools/gapbs_dump_trace.cc` against the bundled GAPBS
+The trace dumper builds `tools/gapbs_dump_trace.cc` against the bundled GAPBS
 headers, generates `kron16`, `kron18`, and `urand18` graphs (Kronecker and
 uniform-random, the Graph500-style generators), splits each array into
 `-offsets` (8 int64 values per line) and `-neighbors` (16 int32 values per

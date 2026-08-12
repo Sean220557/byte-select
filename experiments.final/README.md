@@ -1,6 +1,6 @@
 # Final Compression and MCC Experiment
 
-`tools/run_final_compression_mcc.ps1` accepts one unsplit dataset. The prefix
+`tools/run_single_trace_all_codecs.sh` accepts one unsplit dataset. The prefix
 range is used for training and the suffix range for testing; the split is
 aligned to 256B and the input file is not copied.
 
@@ -23,16 +23,6 @@ The selected ablation algorithm defaults to FPC-BSEL 3KiB. It is additionally
 evaluated with guard 0/1 and region lookback 0/1/2. Candidate segment and gap
 checks are recorded alongside quantized ratios.
 
-```powershell
-powershell -File tools/run_final_compression_mcc.ps1 `
-  -Input datasets/large/dataset-20g.bin `
-  -TrainPercent 20 `
-  -OutputDir results/final-20g `
-  -ChunkMiB 256 `
-  -RoundTrip `
-  -Resume
-```
-
 `final-summary.csv` contains the cross-algorithm result and
 `mcc-ablation-fpc-bsel-3k.csv` contains the MCC ablation. Each chunk resets MCC,
 so chunk-boundary padding is conservatively charged. Larger chunks reduce this
@@ -49,14 +39,10 @@ cmake --build build -j
 cmake -S fpc-bsel.v2 -B fpc-bsel.v2/build -DCMAKE_BUILD_TYPE=Release
 cmake --build fpc-bsel.v2/build -j
 
-chmod +x tools/run_final_compression_mcc.sh
-tools/run_final_compression_mcc.sh \
-  --input /data/dataset-20g.bin \
-  --train-percent 20 \
-  --output-dir results/final-20g \
-  --chunk-mib 256 \
-  --roundtrip \
-  --resume
+chmod +x tools/run_single_trace_all_codecs.sh
+TRAIN_PERCENT=20 CHUNK_MIB=256 ROUNDTRIP=1 RESUME=1 \
+  tools/run_single_trace_all_codecs.sh \
+  /data/dataset-20g.bin results/final-20g
 ```
 
 The Linux runner uses GNU `stat`, `dd`, and `awk`. It streams the test range in
