@@ -79,6 +79,12 @@ FpcResidualWord256Model train_fpc_residual_word_dict(
     const std::vector<Block>& blocks, std::size_t max_words);
 std::size_t fpc_residual_word256_encoded_size(
     const Block& block, const FpcResidualWord256Model& model);
+std::size_t fpc_region_word_encoded_size(
+    const Block& block, const FpcResidualWord256Model& global_model,
+    const std::vector<std::uint32_t>& local_words);
+void update_fpc_region_words(const Block& block,
+                             std::vector<std::uint32_t>& local_words,
+                             std::size_t max_words = 16);
 std::size_t bdi_encoded_size(const Block& block);
 std::size_t cpack_encoded_size(const Block& block);
 std::size_t bpc_encoded_size(const Block& block);

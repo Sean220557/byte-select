@@ -105,13 +105,42 @@ void usage() {
         "  fpc-bsel compress MODEL INPUT OUTPUT\n"
         "  fpc-bsel decompress MODEL INPUT OUTPUT\n"
         "  fpc-bsel evaluate MODEL INPUT\n"
-        "  fpc-bsel roundtrip MODEL INPUT\n";
+        "  fpc-bsel roundtrip MODEL INPUT\n"
+        "  fpc-bsel sizes-256 MODEL INPUT OUTPUT\n";
 }
 }
 
 int main(int argc, char** argv) try {
     if (argc < 2) { usage(); return 1; }
     const std::string command = argv[1];
+    if (command == "sizes-256") {
+        if (argc != 5)
+            throw std::invalid_argument("usage: fpc-bsel sizes-256 MODEL INPUT OUTPUT");
+        const auto model = fpc_bsel::load_model(argv[2]);
+        const auto input = read_file(argv[3]);
+        if (input.empty() || input.size() % 256 != 0)
+            throw std::invalid_argument("sizes-256 input must be a multiple of 256 bytes");
+        std::ofstream sizes(argv[4]);
+        if (!sizes) throw std::runtime_error("cannot create size list");
+        std::uint64_t stored_bytes = 0;
+        for (std::size_t subline = 0; subline < input.size(); subline += 256) {
+            std::size_t payload_bytes = 0;
+            for (std::size_t lane = 0; lane < 4; ++lane) {
+                const auto begin = input.begin() + static_cast<std::ptrdiff_t>(
+                    subline + lane * fpc_bsel::kBlockSize);
+                const Bytes block(begin, begin + fpc_bsel::kBlockSize);
+                const auto encoded = fpc_bsel::encode_block(block, model);
+                payload_bytes += encoded.bytes.size() - 1;
+            }
+            const auto stored = std::min<std::size_t>(256, 1 + payload_bytes);
+            sizes << stored << '\n';
+            stored_bytes += stored;
+        }
+        std::cout << "sublines=" << input.size() / 256
+                  << " original_bytes=" << input.size()
+                  << " stored_bytes=" << stored_bytes << '\n';
+        return 0;
+    }
     if (command == "train") {
         if (argc != 4 && argc != 6) throw std::invalid_argument("invalid train arguments");
         std::size_t max_patterns = 256;

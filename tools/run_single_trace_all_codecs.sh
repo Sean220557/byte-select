@@ -87,12 +87,10 @@ if ! [[ "$chunk_mib" =~ ^[0-9]+$ ]] || (( chunk_mib < 1 )); then
   exit 2
 fi
 if [[ "$roundtrip" != "0" && "$roundtrip" != "1" ]]; then
-  echo "ROUNDTRIP must be 0 or 1" >&2
-  exit 2
+  echo "ROUNDTRIP must be 0 or 1" >&2; exit 2
 fi
 if [[ "$resume" != "0" && "$resume" != "1" ]]; then
-  echo "RESUME must be 0 or 1" >&2
-  exit 2
+  echo "RESUME must be 0 or 1" >&2; exit 2
 fi
 [[ -e "$input_path" ]] || { echo "missing input: $input_path" >&2; exit 2; }
 

@@ -429,6 +429,17 @@ FpcResidualParts split_fpc_residual(const Block& block) {
     return parts;
 }
 
+std::size_t fpc_compact_tag_bits(const std::vector<std::uint8_t>& tags) {
+    if (tags.empty()) return 0;
+    std::size_t runs = 1;
+    for (std::size_t i = 1; i < tags.size(); ++i)
+        runs += tags[i] != tags[i - 1];
+    const auto run_length_bits = std::max(1U, ceil_log2(tags.size()));
+    const auto literal_bits = tags.size() * 3U;
+    const auto rle_bits = runs * (3U + run_length_bits);
+    return 1U + std::min(literal_bits, rle_bits);
+}
+
 Block fpc_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_size) {
     if (output_size == 0 || output_size % 4 != 0) {
         throw std::invalid_argument("FPC output size must be divisible by four bytes");
@@ -498,7 +509,7 @@ FpcTop256Model train_fpc_top256(const std::vector<Block>& blocks) {
 
 std::size_t fpc_top256_encoded_size(const Block& block, const FpcTop256Model& model) {
     const auto parts = split_fpc_residual(block);
-    const auto tag_bits = parts.tags.size() * 3U;
+    const auto tag_bits = fpc_compact_tag_bits(parts.tags);
     const auto residual_bytes =
         model.residuals.find(parts.residual_block) == model.residuals.end()
             ? parts.raw_residual_bytes
@@ -562,11 +573,54 @@ std::size_t fpc_residual_word256_encoded_size(
         residual_payload_bits +=
             model.words.find(value) == model.words.end() ? 32U : model.index_bits;
     }
-    const auto tag_bits = parts.tags.size() * 3U;
+    const auto tag_bits = fpc_compact_tag_bits(parts.tags);
     const auto hitmap_bits = residual_words;
     const auto bits = tag_bits + parts.regular_payload_bits + hitmap_bits +
                       residual_payload_bits;
     return std::min(rounded_up_bytes(bits), fpc_encoded_size(block));
+}
+
+std::size_t fpc_region_word_encoded_size(
+    const Block& block, const FpcResidualWord256Model& global_model,
+    const std::vector<std::uint32_t>& local_words) {
+    const auto parts = split_fpc_residual(block);
+    std::size_t selector_bits = 0, residual_payload_bits = 0;
+    for (std::size_t offset = 0; offset < block.size(); offset += 4) {
+        const auto value = static_cast<std::uint32_t>(
+            load_little_endian(parts.residual_block, offset, 4));
+        if (value == 0) continue;
+        if (std::find(local_words.begin(), local_words.end(), value) != local_words.end()) {
+            selector_bits += 1;
+            residual_payload_bits += 4;
+        } else if (global_model.words.find(value) != global_model.words.end()) {
+            selector_bits += 2;
+            residual_payload_bits += global_model.index_bits;
+        } else {
+            selector_bits += 2;
+            residual_payload_bits += 32;
+        }
+    }
+    const auto bits = fpc_compact_tag_bits(parts.tags) + parts.regular_payload_bits +
+                      selector_bits + residual_payload_bits;
+    return std::min(rounded_up_bytes(bits),
+                    fpc_residual_word256_encoded_size(block, global_model));
+}
+
+void update_fpc_region_words(const Block& block,
+                             std::vector<std::uint32_t>& local_words,
+                             std::size_t max_words) {
+    if (max_words == 0 || max_words > 16)
+        throw std::invalid_argument("FPC region dictionary size must be 1..16");
+    const auto parts = split_fpc_residual(block);
+    for (std::size_t offset = 0; offset < block.size(); offset += 4) {
+        const auto value = static_cast<std::uint32_t>(
+            load_little_endian(parts.residual_block, offset, 4));
+        if (value == 0) continue;
+        const auto existing = std::find(local_words.begin(), local_words.end(), value);
+        if (existing != local_words.end()) local_words.erase(existing);
+        else if (local_words.size() == max_words) local_words.erase(local_words.begin());
+        local_words.push_back(value);
+    }
 }
 
 std::vector<std::uint8_t> bdi_encode(const Block& block) {

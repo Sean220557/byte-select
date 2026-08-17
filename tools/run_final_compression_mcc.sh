@@ -89,7 +89,6 @@ for i in "${!model_names[@]}"; do
       --offset-bytes 0 --length-bytes "$train_bytes" --chunk-mib "$chunk_mib" \
       | tee "$train_log" >> "$training_log"
   fi
-
   eval_log="$output_dir/fpc-models/evaluate-$name.log"
   if ((resume == 0)) || [[ ! -s "$eval_log" ]]; then
     eval_command=evaluate-range
@@ -100,7 +99,13 @@ for i in "${!model_names[@]}"; do
   fi
 done
 
-algorithms=(fpc-bsel-4k fpc-bsel-3k fpc-bsel-2k fpc-bsel-1k fpc bdi hybrid cpack bpc huffman)
+top256_model="$output_dir/fpc-models/fpc-top256-word-v2.model"
+if ((resume == 0)) || [[ ! -s "$top256_model" ]]; then
+  "$bsel_exe" fpc-top256-train-range "$input" "$top256_model" 256 0 "$train_bytes" \
+    | tee "$output_dir/fpc-models/train-top256.log" >> "$training_log"
+fi
+
+algorithms=(fpc-bsel-4k fpc-bsel-3k fpc-bsel-2k fpc-bsel-1k fpc-top256 fpc-top256-xor bdi hybrid-top256 hybrid-top256-xor cpack bpc huffman)
 declare -A model_for=(
   [fpc-bsel-4k]="fpc-4k.model" [fpc-bsel-3k]="fpc-3k.model"
   [fpc-bsel-2k]="fpc-2k.model" [fpc-bsel-1k]="fpc-1k.model"
@@ -129,6 +134,13 @@ while ((remaining > 0)); do
       ((roundtrip)) && size_args+=(--roundtrip)
       "$fpc_exe" "${size_args[@]}" >/dev/null
       "$bsel_exe" mcc-sizes "$sizes" 256 --guard-bytes 1 --region-lookback 1 >> "$mcc_log"
+    elif [[ "$algorithm" == fpc-top256* || "$algorithm" == hybrid-top256* ]]; then
+      sizes="$work/$algorithm.sizes"
+      top256_args=(fpc-top256-sizes "$top256_model" "$raw" "$sizes")
+      [[ "$algorithm" == hybrid-top256* ]] && top256_args+=(--hybrid)
+      [[ "$algorithm" == *-xor ]] && top256_args+=(--spatial-xor)
+      "$bsel_exe" "${top256_args[@]}" >/dev/null
+      "$bsel_exe" mcc-sizes "$sizes" 256 --guard-bytes 1 --region-lookback 1 >> "$mcc_log"
     else
       "$bsel_exe" mcc-baseline "$algorithm" "$raw" 256 \
         --guard-bytes 1 --region-lookback 1 >> "$mcc_log"
@@ -139,6 +151,9 @@ while ((remaining > 0)); do
         guard=${setting%%:*}; lookback=${setting##*:}
         ablation_log="$work/ablation/g${guard}-l${lookback}.log"
         if [[ -n "${model_for[$algorithm]:-}" ]]; then
+          "$bsel_exe" mcc-sizes "$sizes" 256 --guard-bytes "$guard" \
+            --region-lookback "$lookback" >> "$ablation_log"
+        elif [[ "$algorithm" == fpc-top256* || "$algorithm" == hybrid-top256* ]]; then
           "$bsel_exe" mcc-sizes "$sizes" 256 --guard-bytes "$guard" \
             --region-lookback "$lookback" >> "$ablation_log"
         else

@@ -1358,6 +1358,24 @@ std::vector<std::size_t> baseline_stored_sizes(const std::vector<Block>& blocks,
     return sizes;
 }
 
+std::size_t quantize_mcc_subline_size(std::size_t stored_size, std::size_t block_size) {
+    if (stored_size == 0 || stored_size >= block_size || block_size != 256) {
+        return stored_size;
+    }
+    constexpr std::size_t kSublineChunkBytes = 64;
+    return std::min(block_size,
+                    ((stored_size + kSublineChunkBytes - 1) / kSublineChunkBytes) *
+                        kSublineChunkBytes);
+}
+
+std::vector<std::size_t> quantize_mcc_subline_sizes(
+    std::vector<std::size_t> sizes, std::size_t block_size) {
+    for (auto& size : sizes) {
+        size = quantize_mcc_subline_size(size, block_size);
+    }
+    return sizes;
+}
+
 std::vector<std::size_t> fpc_top256_stored_sizes(const std::vector<Block>& blocks,
                                                  const bsel::FpcTop256Model& model) {
     std::vector<std::size_t> sizes;
@@ -1366,6 +1384,148 @@ std::vector<std::size_t> fpc_top256_stored_sizes(const std::vector<Block>& block
         sizes.push_back(bsel::fpc_top256_encoded_size(block, model));
     }
     return sizes;
+}
+
+void save_fpc_top256_model(const std::string& path, std::size_t block_size,
+                           const bsel::FpcResidualWord256Model& model) {
+    std::ofstream output(path, std::ios::binary);
+    if (!output) throw std::runtime_error("cannot create FPC Top-256 model");
+    output << "FPCWORD256 1 " << block_size << ' ' << model.words.size()
+           << ' ' << model.index_bits << '\n';
+    for (const auto word : model.words)
+        output.write(reinterpret_cast<const char*>(&word), sizeof(word));
+}
+
+std::pair<std::size_t, bsel::FpcResidualWord256Model> load_fpc_top256_model(
+    const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    std::string magic;
+    unsigned version = 0;
+    std::size_t block_size = 0, count = 0;
+    unsigned index_bits = 0;
+    if (!(input >> magic >> version >> block_size >> count >> index_bits) ||
+        magic != "FPCWORD256" || version != 1 || block_size == 0 || count > 256 ||
+        index_bits == 0 || index_bits > 8)
+        throw std::runtime_error("invalid FPC Top-256 model");
+    input.get();
+    bsel::FpcResidualWord256Model model;
+    model.index_bits = index_bits;
+    for (std::size_t i = 0; i < count; ++i) {
+        std::uint32_t word = 0;
+        input.read(reinterpret_cast<char*>(&word), sizeof(word));
+        if (!input) throw std::runtime_error("truncated FPC Top-256 model");
+        model.words.insert(word);
+    }
+    return {block_size, std::move(model)};
+}
+
+void command_fpc_top256_train_range(int argc, char** argv) {
+    if (argc != 7)
+        throw std::runtime_error("usage: bsel fpc-top256-train-range INPUT MODEL BLOCK_SIZE OFFSET LENGTH");
+    const auto block_size = parse_size(argv[4], "block size");
+    const auto offset = parse_nonnegative_size(argv[5], "offset");
+    const auto length = parse_size(argv[6], "length");
+    if (offset % block_size || length % block_size)
+        throw std::runtime_error("FPC Top-256 range must be block aligned");
+    std::ifstream input(argv[2], std::ios::binary);
+    if (!input) throw std::runtime_error("cannot open Top-256 training input");
+    input.seekg(static_cast<std::streamoff>(offset));
+    std::vector<Block> blocks;
+    blocks.reserve(length / block_size);
+    for (std::size_t used = 0; used < length; used += block_size) {
+        Block block(block_size);
+        input.read(reinterpret_cast<char*>(block.data()), static_cast<std::streamsize>(block_size));
+        if (!input) throw std::runtime_error("Top-256 training range exceeds input");
+        blocks.push_back(std::move(block));
+    }
+    const auto model = bsel::train_fpc_residual_word256(blocks);
+    save_fpc_top256_model(argv[3], block_size, model);
+    std::cout << "top256_words=" << model.words.size()
+              << " training_blocks=" << blocks.size() << '\n';
+}
+
+void command_fpc_top256_sizes(int argc, char** argv) {
+    if (argc < 5 || argc > 7)
+        throw std::runtime_error("usage: bsel fpc-top256-sizes MODEL INPUT OUTPUT [--hybrid] [--spatial-xor]");
+    bool hybrid = false, spatial_xor = false;
+    for (int i = 5; i < argc; ++i) {
+        const std::string option = argv[i];
+        if (option == "--hybrid") hybrid = true;
+        else if (option == "--spatial-xor") spatial_xor = true;
+        else throw std::runtime_error("unknown FPC Top-256 size option: " + option);
+    }
+    const auto loaded = load_fpc_top256_model(argv[2]);
+    const auto blocks = split_blocks(read_bytes(argv[3]), loaded.first, false);
+    std::ofstream output(argv[4]);
+    if (!output) throw std::runtime_error("cannot create Top-256 size list");
+    std::uint64_t stored = 0;
+    std::uint64_t previous_xor_blocks = 0, anchor_xor_blocks = 0;
+    std::uint64_t previous_delta_blocks = 0;
+    const auto blocks_per_region = std::max<std::size_t>(1, 4096 / loaded.first);
+    std::vector<std::size_t> sizes;
+    std::vector<std::uint32_t> region_words;
+    sizes.reserve(blocks.size());
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+        if (i % blocks_per_region == 0) region_words.clear();
+        const auto& block = blocks[i];
+        auto size = bsel::fpc_region_word_encoded_size(block, loaded.second, region_words);
+        if (hybrid) size = std::min(size, bsel::bdi_encoded_size(block));
+        if (spatial_xor && i % blocks_per_region != 0) {
+            unsigned selected_spatial_mode = 0;
+            Block transformed(block.size());
+            std::transform(block.begin(), block.end(), blocks[i - 1].begin(), transformed.begin(),
+                           [](std::uint8_t value, std::uint8_t previous) {
+                               return static_cast<std::uint8_t>(value ^ previous);
+                           });
+            auto candidate =
+                bsel::fpc_region_word_encoded_size(transformed, loaded.second,
+                                                   region_words) + 1;
+            if (candidate < size) { size = candidate; selected_spatial_mode = 1; }
+
+            const auto anchor = i - i % blocks_per_region;
+            std::transform(block.begin(), block.end(), blocks[anchor].begin(), transformed.begin(),
+                           [](std::uint8_t value, std::uint8_t reference) {
+                               return static_cast<std::uint8_t>(value ^ reference);
+                           });
+            candidate =
+                bsel::fpc_region_word_encoded_size(transformed, loaded.second,
+                                                   region_words) + 1;
+            if (candidate < size) { size = candidate; selected_spatial_mode = 2; }
+
+            for (std::size_t offset = 0; offset < block.size(); offset += 4) {
+                const auto current = static_cast<std::uint32_t>(
+                    static_cast<std::uint32_t>(block[offset]) |
+                    (static_cast<std::uint32_t>(block[offset + 1]) << 8U) |
+                    (static_cast<std::uint32_t>(block[offset + 2]) << 16U) |
+                    (static_cast<std::uint32_t>(block[offset + 3]) << 24U));
+                const auto previous = static_cast<std::uint32_t>(
+                    static_cast<std::uint32_t>(blocks[i - 1][offset]) |
+                    (static_cast<std::uint32_t>(blocks[i - 1][offset + 1]) << 8U) |
+                    (static_cast<std::uint32_t>(blocks[i - 1][offset + 2]) << 16U) |
+                    (static_cast<std::uint32_t>(blocks[i - 1][offset + 3]) << 24U));
+                const auto delta = current - previous;
+                for (unsigned byte = 0; byte < 4; ++byte)
+                    transformed[offset + byte] = static_cast<std::uint8_t>(delta >> (8U * byte));
+            }
+            candidate =
+                bsel::fpc_region_word_encoded_size(transformed, loaded.second,
+                                                   region_words) + 1;
+            if (candidate < size) { size = candidate; selected_spatial_mode = 3; }
+            previous_xor_blocks += selected_spatial_mode == 1;
+            anchor_xor_blocks += selected_spatial_mode == 2;
+            previous_delta_blocks += selected_spatial_mode == 3;
+        }
+        sizes.push_back(size);
+        bsel::update_fpc_region_words(block, region_words);
+    }
+    for (const auto size : sizes) {
+        output << size << '\n';
+        stored += size;
+    }
+    std::cout << "blocks=" << blocks.size() << " stored_bytes=" << stored
+              << " previous_xor_blocks=" << previous_xor_blocks
+              << " anchor_xor_blocks=" << anchor_xor_blocks
+              << " previous_delta_blocks=" << previous_delta_blocks << '\n';
 }
 
 std::vector<std::size_t> fpc_residual_word256_stored_sizes(
@@ -1411,8 +1571,8 @@ void command_mcc_sizes(int argc, char** argv) {
     if (argc < 4) {
         throw std::runtime_error("usage: bsel mcc-sizes SIZE_LIST BLOCK_SIZE [--base N] [--alignment N] [--metadata-granularity N] [--guard-bytes N] [--region-lookback N]");
     }
-    const auto sizes = read_size_list(argv[2]);
     const auto block_size = parse_size(argv[3], "block size");
+    const auto sizes = quantize_mcc_subline_sizes(read_size_list(argv[2]), block_size);
     bsel::MccConfig config;
     for (int i = 4; i < argc; ++i) {
         const std::string option = argv[i];
@@ -1484,7 +1644,8 @@ void command_mcc_baseline(int argc, char** argv) {
     }
     const auto blocks = split_blocks(read_bytes(argv[3]), block_size, false);
     if (blocks.empty()) throw std::runtime_error("baseline input has no full blocks");
-    const auto sizes = baseline_stored_sizes(blocks, kind);
+    const auto sizes = quantize_mcc_subline_sizes(baseline_stored_sizes(blocks, kind),
+                                                  block_size);
     auto before = config;
     before.fill_padding = false;
     before.placement_mode = bsel::MccPlacementMode::AlignedRecords;
@@ -1590,7 +1751,8 @@ void command_mcc_compare(int argc, char** argv) {
         bsel::BaselineKind::Bpc, bsel::BaselineKind::Huffman};
     for (const auto kind : baselines) {
         try {
-            const auto sizes = baseline_stored_sizes(blocks, kind);
+            const auto sizes = quantize_mcc_subline_sizes(
+                baseline_stored_sizes(blocks, kind), model.block_size);
             print_mcc_comparison_row(
                 bsel::baseline_kind_name(kind),
                 bsel::place_stored_blocks_in_memory(sizes, model.block_size, before_config),
@@ -1617,7 +1779,8 @@ void command_mcc_compare(int argc, char** argv) {
         }
     }
     const auto top256 = bsel::train_fpc_top256(blocks);
-    const auto top256_sizes = fpc_top256_stored_sizes(blocks, top256);
+    const auto top256_sizes = quantize_mcc_subline_sizes(
+        fpc_top256_stored_sizes(blocks, top256), model.block_size);
     print_mcc_comparison_row(
         "fpc-top256",
         bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, before_config),
@@ -1640,7 +1803,8 @@ void command_mcc_compare(int argc, char** argv) {
         bsel::place_stored_blocks_in_memory(top256_sizes, model.block_size, v5_config));
 
     const auto word256 = bsel::train_fpc_residual_word256(blocks);
-    const auto word256_sizes = fpc_residual_word256_stored_sizes(blocks, word256);
+    const auto word256_sizes = quantize_mcc_subline_sizes(
+        fpc_residual_word256_stored_sizes(blocks, word256), model.block_size);
     print_mcc_comparison_row(
         "fpc-resword256",
         bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, before_config),
@@ -1663,7 +1827,8 @@ void command_mcc_compare(int argc, char** argv) {
         bsel::place_stored_blocks_in_memory(word256_sizes, model.block_size, v5_config));
 
     const auto word64 = bsel::train_fpc_residual_word_dict(blocks, 64);
-    const auto word64_sizes = fpc_residual_word256_stored_sizes(blocks, word64);
+    const auto word64_sizes = quantize_mcc_subline_sizes(
+        fpc_residual_word256_stored_sizes(blocks, word64), model.block_size);
     print_mcc_comparison_row(
         "fpc-resword64",
         bsel::place_stored_blocks_in_memory(word64_sizes, model.block_size, before_config),
@@ -1726,6 +1891,8 @@ void print_usage() {
         << "                   [--metadata-granularity N]\n"
         << "  bsel mcc-sizes SIZE_LIST BLOCK_SIZE [--base N] [--alignment N]\n"
         << "  bsel mcc-baseline BASELINE INPUT BLOCK_SIZE [--guard-bytes N] [--region-lookback N]\n"
+        << "  bsel fpc-top256-train-range INPUT MODEL BLOCK_SIZE OFFSET LENGTH\n"
+        << "  bsel fpc-top256-sizes MODEL INPUT OUTPUT [--hybrid] [--spatial-xor]\n"
         << "                 [--metadata-granularity N]\n"
         << "  bsel generate-rtl MODEL OUTPUT_DIRECTORY\n";
 }
@@ -1773,6 +1940,10 @@ int main(int argc, char** argv) {
             command_mcc_compare(argc, argv);
         } else if (command == "mcc-sizes") {
             command_mcc_sizes(argc, argv);
+        } else if (command == "fpc-top256-train-range") {
+            command_fpc_top256_train_range(argc, argv);
+        } else if (command == "fpc-top256-sizes") {
+            command_fpc_top256_sizes(argc, argv);
         } else if (command == "mcc-baseline") {
             command_mcc_baseline(argc, argv);
         } else if (command == "generate-rtl") {

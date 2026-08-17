@@ -169,13 +169,66 @@ void usage() {
         "  fpc-bsel roundtrip-stream MODEL INPUT [--chunk-mib N]\n"
         "  fpc-bsel evaluate-range MODEL INPUT --offset-bytes N --length-bytes N [--chunk-mib N]\n"
         "  fpc-bsel roundtrip-range MODEL INPUT --offset-bytes N --length-bytes N [--chunk-mib N]\n"
-        "  fpc-bsel sizes-256 MODEL INPUT OUTPUT [--roundtrip]\n";
+        "  fpc-bsel sizes-256 MODEL INPUT OUTPUT [--roundtrip]\n"
+        "  fpc-bsel payloads-256 MODEL INPUT OUTPUT\n"
+        "  fpc-bsel lane-sizes-256 MODEL INPUT OUTPUT\n";
 }
 }
 
 int main(int argc, char** argv) try {
     if (argc < 2) { usage(); return 1; }
     const std::string command = argv[1];
+    if (command == "payloads-256") {
+        if (argc != 5)
+            throw std::invalid_argument("usage: fpc-bsel payloads-256 MODEL INPUT OUTPUT");
+        const auto model = fpc_bsel::load_model(argv[2]);
+        const auto input = read_file(argv[3]);
+        if (input.empty() || input.size() % 256 != 0)
+            throw std::invalid_argument("payloads-256 input must be a multiple of 256 bytes");
+        Bytes output;
+        output.insert(output.end(), {'F','P','C','P','A','Y','1','\0'});
+        put_u64(output, input.size() / 256);
+        for (std::size_t subline = 0; subline < input.size(); subline += 256) {
+            Bytes payload;
+            for (std::size_t lane = 0; lane < 4; ++lane) {
+                const auto begin = input.begin() + static_cast<std::ptrdiff_t>(
+                    subline + lane * fpc_bsel::kBlockSize);
+                const Bytes block(begin, begin + fpc_bsel::kBlockSize);
+                const auto encoded = fpc_bsel::encode_block(block, model);
+                payload.insert(payload.end(), encoded.bytes.begin() + 1, encoded.bytes.end());
+            }
+            put_u16(output, payload.size());
+            output.insert(output.end(), payload.begin(), payload.end());
+        }
+        write_file(argv[4], output);
+        std::cout << "sublines=" << input.size() / 256
+                  << " payload_bytes=" << output.size() - 16 << '\n';
+        return 0;
+    }
+    if (command == "lane-sizes-256") {
+        if (argc != 5)
+            throw std::invalid_argument("usage: fpc-bsel lane-sizes-256 MODEL INPUT OUTPUT");
+        const auto model = fpc_bsel::load_model(argv[2]);
+        const auto input = read_file(argv[3]);
+        if (input.empty() || input.size() % 256 != 0)
+            throw std::invalid_argument("lane-sizes-256 input must be a multiple of 256 bytes");
+        std::ofstream sizes(argv[4]);
+        if (!sizes) throw std::runtime_error("cannot create lane size list");
+        for (std::size_t subline = 0; subline < input.size(); subline += 256) {
+            for (std::size_t lane = 0; lane < 4; ++lane) {
+                const auto begin = input.begin() + static_cast<std::ptrdiff_t>(
+                    subline + lane * fpc_bsel::kBlockSize);
+                const Bytes block(begin, begin + fpc_bsel::kBlockSize);
+                const auto encoded = fpc_bsel::encode_block(block, model);
+                if (lane != 0) sizes << ',';
+                // The 256B format replaces four lane mode bytes with one shared
+                // mode map, so report only each lane's payload contribution.
+                sizes << encoded.bytes.size() - 1;
+            }
+            sizes << '\n';
+        }
+        return 0;
+    }
     if (command == "sizes-256") {
         if (argc != 5 && argc != 6)
             throw std::invalid_argument("invalid sizes-256 arguments");
