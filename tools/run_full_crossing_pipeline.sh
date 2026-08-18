@@ -15,6 +15,7 @@ Methods included:
   baseline-fpc-bsel
   slot-exception          hardware-friendly target for 2K->1K
   3k-boundary-effect      slack-funded region-local micro-table for 3K->2K
+  metadata-only-0k        special-pattern metadata-only target for 1K->0K
 
 Options:
   --input FILE            One complete dataset file.
@@ -35,6 +36,7 @@ Tuning environment variables:
   THREEK_EFFECT_CAP=512
   THREEK_BANK_BUDGET=192
   THREEK_MAX_ENTRIES=4          must be <=4 for current direct-marker codec
+  ZERO_K_LOOKBACK=64
 
 Example:
   bash tools/run_full_crossing_pipeline.sh --input /data/spark.trace --output-dir results/spark-cross
@@ -84,7 +86,8 @@ threek_candidate_cap=${THREEK_CANDIDATE_CAP:-128}
 threek_effect_cap=${THREEK_EFFECT_CAP:-512}
 threek_bank_budget=${THREEK_BANK_BUDGET:-192}
 threek_max_entries=${THREEK_MAX_ENTRIES:-4}
-for item in "$max_gap" "$threek_candidate_cap" "$threek_effect_cap" "$threek_bank_budget" "$threek_max_entries"; do
+zero_k_lookback=${ZERO_K_LOOKBACK:-64}
+for item in "$max_gap" "$threek_candidate_cap" "$threek_effect_cap" "$threek_bank_budget" "$threek_max_entries" "$zero_k_lookback"; do
   [[ "$item" =~ ^[0-9]+$ ]] || { echo "tuning variables must be non-negative integers" >&2; exit 2; }
 done
 ((threek_max_entries <= 4)) || { echo "THREEK_MAX_ENTRIES must be <=4 for current direct-marker codec" >&2; exit 2; }
@@ -99,7 +102,19 @@ mkdir -p "$output_dir"
 output_dir=$(realpath "$output_dir")
 
 command -v cmake >/dev/null || { echo "cmake is required" >&2; exit 2; }
-command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 2; }
+python_bin=""
+for candidate in python3.11 python3.10 python3.9 python3.8 python3.7 python3; do
+  if command -v "$candidate" >/dev/null; then
+    python_bin=$candidate
+    break
+  fi
+done
+[[ -n "$python_bin" ]] || { echo "python3.7+ is required" >&2; exit 2; }
+"$python_bin" - <<'PY'
+import sys
+if sys.version_info < (3, 7):
+    raise SystemExit("python3.7+ is required")
+PY
 
 build_dir="$repo/fpc-bsel.v2/build-linux-full-crossing"
 exe="$build_dir/fpc-bsel-v2"
@@ -115,7 +130,7 @@ dataset_list="$output_dir/datasets.tsv"
 if [[ -n "$input" ]]; then
   input=$(resolve_path "$input")
   [[ -f "$input" ]] || { echo "missing input file: $input" >&2; exit 1; }
-  python3 - "$input" "$dataset_list" <<'PY'
+  "$python_bin" - "$input" "$dataset_list" <<'PY'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1]).resolve()
@@ -125,7 +140,7 @@ PY
 else
   input_dir=$(resolve_path "$input_dir")
   [[ -d "$input_dir" ]] || { echo "missing input dir: $input_dir" >&2; exit 1; }
-  python3 - "$input_dir" "$dataset_list" <<'PY'
+  "$python_bin" - "$input_dir" "$dataset_list" <<'PY'
 from pathlib import Path
 import sys
 root, out = Path(sys.argv[1]).resolve(), Path(sys.argv[2])
@@ -144,7 +159,7 @@ fi
 
 prepare_split() {
   local source=$1 train=$2 test=$3 meta=$4
-  python3 - "$source" "$train" "$test" "$meta" "$train_percent" "$limit_mib" <<'PY'
+  "$python_bin" - "$source" "$train" "$test" "$meta" "$train_percent" "$limit_mib" <<'PY'
 from pathlib import Path
 import json
 import sys
@@ -200,28 +215,34 @@ while IFS=$'\t' read -r name source; do
   "$exe" payloads-256 "$model" "$test" "$test_payload"
 
   echo "[dataset:$name] slot+exception"
-  python3 "$repo/tools/experiment_slot_exception.py" \
+  "$python_bin" "$repo/tools/experiment_slot_exception.py" \
     "$test_payload" --name "$name" --output-dir "$work/slot" \
     --exception-model "$exception_model" --max-gap "$max_gap" | tee "$work/slot.log"
 
   echo "[dataset:$name] 3K boundary effect micro-table"
-  python3 "$repo/tools/experiment_3k_boundary_shaving.py" \
+  "$python_bin" "$repo/tools/experiment_3k_boundary_shaving.py" \
     "$train_payload" "$test_payload" --name "$name" --output-dir "$work/3k" \
     --oracle-region-local --pool-policy effect --stride 1 \
     --max-entries "$threek_max_entries" --bank-budget "$threek_bank_budget" \
     --candidate-cap "$threek_candidate_cap" --effect-candidate-cap "$threek_effect_cap" \
     --max-boundary-need 64 --max-gap "$max_gap" | tee "$work/3k-effect.log"
 
+  echo "[dataset:$name] metadata-only 1K->0K"
+  "$python_bin" "$repo/tools/experiment_metadata_only_0k.py" \
+    "$test" --payloads "$test_payload" --name "$name" --output-dir "$work/0k" \
+    --lookback "$zero_k_lookback" | tee "$work/0k.log"
+
   final_csv="$work/crossing-summary.csv"
-  python3 - "$repo/tools" "$name" "$test_payload" \
+  "$python_bin" - "$repo/tools" "$name" "$test_payload" \
     "$work/slot/$name-slot-exception-summary.csv" \
     "$work/3k/$name-3k-boundary-local-summary.csv" \
+    "$work/0k/$name-metadata-only-0k-summary.csv" \
     "$final_csv" <<'PY'
 from pathlib import Path
 import csv
 import sys
 
-repo_tools, name, payload, slot_csv, threek_csv, output = sys.argv[1:]
+repo_tools, name, payload, slot_csv, threek_csv, zerok_csv, output = sys.argv[1:]
 sys.path.insert(0, repo_tools)
 import experiment_fpc_payload_lz as pp
 
@@ -251,6 +272,14 @@ with open(threek_csv, newline="") as f:
         "eligible": int(row["eligible"]), "crossed": int(row["crossed"]),
         "changed": int(row["changed"]), "saved_bytes": int(row["saved_bytes"]),
     })
+with open(zerok_csv, newline="") as f:
+    row = next(csv.DictReader(f))
+    rows.append({
+        "dataset": name, "method": "metadata-only-0k",
+        "before_tier": int(row["before_tier"]), "target": int(row["target"]),
+        "eligible": int(row["eligible"]), "crossed": int(row["crossed"]),
+        "changed": int(row["changed"]), "saved_bytes": int(row["saved_bytes"]),
+    })
 with open(output, "w", newline="") as f:
     w = csv.DictWriter(f, fieldnames=rows[0].keys())
     w.writeheader()
@@ -267,26 +296,26 @@ done
 
 echo
 echo "================ CROSSING SUMMARY ================"
-python3 - "$combined" <<'PY'
+"$python_bin" - "$combined" <<'PY'
 import csv
 import sys
 from collections import defaultdict
 
 rows = list(csv.DictReader(open(sys.argv[1], newline="")))
-data = defaultdict(lambda: [0, 0, 0, 0, 0, 0])
+data = defaultdict(lambda: [0, 0, 0, 0, 0, 0, 0, 0])
 for row in rows:
     tier = int(row["before_tier"])
-    idx = {4096: 0, 3072: 1, 2048: 2}[tier]
+    idx = {4096: 0, 3072: 1, 2048: 2, 1024: 3}[tier]
     key = (row["dataset"], row["method"])
     data[key][idx] += int(row["crossed"])
-    data[key][idx + 3] += int(row["eligible"])
-print(f'{"dataset":30} {"method":22} {"4K->3K":>13} {"3K->2K":>13} {"2K->1K":>13} {"total":>8}')
+    data[key][idx + 4] += int(row["eligible"])
+print(f'{"dataset":30} {"method":22} {"4K->3K":>13} {"3K->2K":>13} {"2K->1K":>13} {"1K->0K":>13} {"total":>8}')
 for (dataset, method), values in sorted(data.items()):
     parts = []
     total_crossed = 0
-    for i in range(3):
+    for i in range(4):
         total_crossed += values[i]
-        parts.append(f"{values[i]}/{values[i + 3]}")
-    print(f'{dataset[:30]:30} {method:22} {parts[0]:>13} {parts[1]:>13} {parts[2]:>13} {total_crossed:8d}')
+        parts.append(f"{values[i]}/{values[i + 4]}")
+    print(f'{dataset[:30]:30} {method:22} {parts[0]:>13} {parts[1]:>13} {parts[2]:>13} {parts[3]:>13} {total_crossed:8d}')
 print(f"combined_csv={sys.argv[1]}")
 PY

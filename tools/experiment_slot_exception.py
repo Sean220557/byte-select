@@ -7,8 +7,6 @@ chosen slot are represented by a compact exception directory and an exception
 area. This script is an accounting experiment: it measures whether this layout
 can move regions across 4K/3K/2K/1K allocation tiers after FPC+BSEL.
 """
-from __future__ import annotations
-
 import argparse
 import csv
 import json

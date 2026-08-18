@@ -36,7 +36,19 @@ output_dir=$(realpath "$output_dir")
 
 [[ -d "$dataset_dir" ]] || { echo "not a dataset directory: $dataset_dir" >&2; exit 2; }
 command -v cmake >/dev/null || { echo "cmake is required" >&2; exit 2; }
-command -v python3 >/dev/null || { echo "python3 is required" >&2; exit 2; }
+python_bin=""
+for candidate in python3.11 python3.10 python3.9 python3.8 python3.7 python3; do
+  if command -v "$candidate" >/dev/null; then
+    python_bin=$candidate
+    break
+  fi
+done
+[[ -n "$python_bin" ]] || { echo "python3.7+ is required" >&2; exit 2; }
+"$python_bin" - <<'PY'
+import sys
+if sys.version_info < (3, 7):
+    raise SystemExit("python3.7+ is required")
+PY
 
 limit_mib=${LIMIT_MIB:-0}
 jobs=${JOBS:-$(nproc)}
@@ -65,7 +77,7 @@ fi
 [[ -x "$exe" ]] || { echo "missing executable: $exe" >&2; exit 1; }
 
 pair_list="$output_dir/dataset-pairs.tsv"
-python3 - "$dataset_dir" "$pair_list" <<'PY'
+"$python_bin" - "$dataset_dir" "$pair_list" <<'PY'
 from pathlib import Path
 import sys
 
@@ -99,7 +111,7 @@ PY
 
 prepare_trace() {
   local source=$1 destination=$2
-  python3 - "$source" "$destination" "$limit_mib" <<'PY'
+  "$python_bin" - "$source" "$destination" "$limit_mib" <<'PY'
 from pathlib import Path
 import sys
 
@@ -143,7 +155,7 @@ while IFS=$'\t' read -r name train_source test_source; do
   "$exe" payloads-256 "$model" "$test" "$test_payload"
 
   echo "[dataset:$name] slot+exception"
-  python3 "$repo/tools/experiment_slot_exception.py" \
+  "$python_bin" "$repo/tools/experiment_slot_exception.py" \
     "$test_payload" --name "$name" --output-dir "$work" \
     --exception-model "$exception_model" --max-gap "$max_gap" | tee "$work/slot-exception.log"
   summaries+=("$work/$name-slot-exception-summary.csv")
@@ -157,7 +169,7 @@ done
 
 echo
 echo "================ SLOT+EXCEPTION SUMMARY ================"
-python3 - "$combined" <<'PY'
+"$python_bin" - "$combined" <<'PY'
 import csv
 import sys
 from collections import defaultdict

@@ -6,8 +6,6 @@ codec; it tests whether a small var-string bank, seeded from boundary-critical
 payloads, can shave enough 64B quantization segments to move 3K-tier regions
 down to 2K.
 """
-from __future__ import annotations
-
 import argparse
 import csv
 import json
