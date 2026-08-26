@@ -7,7 +7,7 @@ Usage:
   bash tools/run_large_codebook_pruning.sh DATASET_DIR [OUTPUT_DIR]
 
 Complete large-dataset pipeline:
-  1. discover complete .trace/.bin/.dat datasets;
+  1. discover complete .trace/.bin/.dat/.log datasets;
   2. split every file by 4KiB region into FPC/codebook train and test;
   3. build and test the latest fpc-bsel.v2;
   4. train Top-256 FPC+BSEL and export real 16x256B payloads;
@@ -93,9 +93,9 @@ from pathlib import Path
 import sys
 root, output = Path(sys.argv[1]).resolve(), Path(sys.argv[2])
 files = [p for p in sorted(root.rglob("*"))
-         if p.is_file() and p.suffix.lower() in {".trace", ".bin", ".dat"}]
+         if p.is_file() and p.suffix.lower() in {".trace", ".bin", ".dat", ".log"}]
 if not files:
-    raise SystemExit("no .trace/.bin/.dat dataset files found")
+    raise SystemExit("no .trace/.bin/.dat/.log dataset files found")
 with output.open("w", encoding="utf-8") as out:
     for path in files:
         rel = path.relative_to(root).with_suffix("")
