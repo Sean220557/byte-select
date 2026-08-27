@@ -42,6 +42,7 @@ if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then usage; exit 0; fi
 [[ $# -ge 1 && $# -le 2 ]] || { usage >&2; exit 2; }
 
 repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export PYTHONPATH="$repo/tools${PYTHONPATH:+:$PYTHONPATH}"
 dataset_dir=$(realpath "$1")
 output_dir=${2:-"$repo/results/large-codebook-pruning"}
 mkdir -p "$output_dir"

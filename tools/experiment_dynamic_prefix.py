@@ -6,9 +6,14 @@ import argparse
 import csv
 import json
 import math
+import sys
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 from experiment_2k_to_1k_algorithms import BitReader, BitWriter, Region, read_payloads
 
 
@@ -27,6 +32,7 @@ class PrefixCache:
     prefix_lengths: tuple[int, ...]
     policy: str = "fifo"
     contextual: bool = False
+    stats: dict | None = None
 
     def __post_init__(self) -> None:
         self.entries: list[bytes] = []
@@ -39,6 +45,8 @@ class PrefixCache:
         self.scores.clear()
         self.contexts.clear()
         self.next_slot = 0
+        if self.stats is not None:
+            self.stats["resets"] += 1
 
     def best(self, chunk: bytes, context: int = 0) -> tuple[int, bytes] | None:
         matches = [
@@ -47,7 +55,17 @@ class PrefixCache:
             if len(prefix) < len(chunk) and chunk.startswith(prefix)
             and (not self.contextual or self.contexts[idx] == context)
         ]
-        return max(matches, key=lambda item: len(item[1]), default=None)
+        result = max(matches, key=lambda item: len(item[1]), default=None)
+        if self.stats is not None:
+            self.stats["lookups"] += 1
+            self.stats["occupancy_sum"] += len(self.entries)
+            self.stats["peak_entries"] = max(self.stats["peak_entries"], len(self.entries))
+            if result is None:
+                self.stats["misses"] += 1
+            else:
+                self.stats["hits"] += 1
+                self.stats["hits_by_prefix_length"][str(len(result[1]))] += 1
+        return result
 
     def touch(self, index: int) -> None:
         if self.policy == "clock":
@@ -79,11 +97,15 @@ class PrefixCache:
                 self.entries.append(prefix)
                 self.scores.append(0)
                 self.contexts.append(context)
+                if self.stats is not None:
+                    self.stats["insertions"] += 1
             else:
                 slot = self._replacement_slot()
                 self.entries[slot] = prefix
                 self.scores[slot] = 0
                 self.contexts[slot] = context
+                if self.stats is not None:
+                    self.stats["evictions"] += 1
 
 
 def length_header(region: Region) -> bytes:
@@ -101,11 +123,12 @@ def dynamic_prefix_encode(
     cache_policy: str = "fifo",
     cache_runs: bool = False,
     context_bits: int = 0,
+    stats: dict | None = None,
 ) -> bytes:
     if cache_entries <= 0 or cache_entries & (cache_entries - 1):
         raise ValueError("cache_entries must be a positive power of two")
     index_bits = int(math.log2(cache_entries))
-    cache = PrefixCache(cache_entries, prefix_lengths, cache_policy, context_bits > 0)
+    cache = PrefixCache(cache_entries, prefix_lengths, cache_policy, context_bits > 0, stats)
     predictor_enabled = previous_prefix or previous_subline_prefix
     class_bits = max(1, math.ceil(math.log2(len(prefix_lengths))))
     previous: bytes | None = None
@@ -308,10 +331,16 @@ def evaluate(
     algorithm_before = algorithm_after = quantized_before = quantized_after = 0
     transitions: dict[str, int] = {}
     crossed = 0
+    cache_stats = {
+        "lookups": 0, "hits": 0, "misses": 0, "insertions": 0,
+        "evictions": 0, "resets": 0, "occupancy_sum": 0,
+        "peak_entries": 0, "hits_by_prefix_length": Counter(),
+    }
     for region in regions:
         baseline = region.raw_blob()
         encoded = dynamic_prefix_encode(
-            region, entries, reset, word, prefixes, previous_prefix, previous_subline_prefix, cache_policy, cache_runs, context_bits
+            region, entries, reset, word, prefixes, previous_prefix, previous_subline_prefix,
+            cache_policy, cache_runs, context_bits, cache_stats
         )
         decoded = dynamic_prefix_decode(
             encoded, entries, reset, word, prefixes, previous_prefix, previous_subline_prefix, cache_policy, cache_runs, context_bits
@@ -341,6 +370,20 @@ def evaluate(
             "raw_saved": len(baseline) - chosen,
         })
     original = len(regions) * 4096
+    # Hardware estimate used throughout the project: 4 bytes per prefix entry,
+    # 2 CLOCK bits per entry, one 4-byte previous-word register, and a rounded
+    # 4-byte control/pointer register. FIFO omits the CLOCK score array.
+    entry_bytes = entries * 4
+    clock_bytes = math.ceil(entries * 2 / 8) if cache_policy == "clock" else 0
+    predictor_bytes = word if (previous_prefix or previous_subline_prefix) else 0
+    control_bytes = 4
+    runtime_state_bytes = entry_bytes + clock_bytes + predictor_bytes + control_bytes
+    lookups = cache_stats["lookups"]
+    cache_stats["hit_rate"] = cache_stats["hits"] / lookups if lookups else 0.0
+    cache_stats["average_occupancy"] = cache_stats["occupancy_sum"] / lookups if lookups else 0.0
+    cache_stats["occupancy_ratio"] = cache_stats["average_occupancy"] / entries if entries else 0.0
+    cache_stats["hits_by_prefix_length"] = dict(cache_stats["hits_by_prefix_length"])
+    cache_stats.pop("occupancy_sum")
     summary = {
         "method": method,
         "regions": len(regions),
@@ -355,6 +398,14 @@ def evaluate(
         "quantized_ratio_after": quantized_after / original,
         "crossed_regions": crossed,
         "transitions": transitions,
+        "cache_entries": entries,
+        "cache_entry_bytes": entry_bytes,
+        "clock_score_bytes": clock_bytes,
+        "predictor_bytes": predictor_bytes,
+        "control_bytes": control_bytes,
+        "runtime_state_bytes": runtime_state_bytes,
+        "static_codebook_bytes": 0,
+        "cache_stats": cache_stats,
     }
     return summary, rows
 
