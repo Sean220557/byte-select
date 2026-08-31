@@ -370,9 +370,6 @@ def evaluate(
             "raw_saved": len(baseline) - chosen,
         })
     original = len(regions) * 4096
-    # Hardware estimate used throughout the project: 4 bytes per prefix entry,
-    # 2 CLOCK bits per entry, one 4-byte previous-word register, and a rounded
-    # 4-byte control/pointer register. FIFO omits the CLOCK score array.
     entry_bytes = entries * 4
     clock_bytes = math.ceil(entries * 2 / 8) if cache_policy == "clock" else 0
     predictor_bytes = word if (previous_prefix or previous_subline_prefix) else 0
