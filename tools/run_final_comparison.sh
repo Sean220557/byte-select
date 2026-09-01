@@ -69,9 +69,9 @@ for entries in "${cache_entries[@]}"; do
   ((entries > 0 && (entries & (entries - 1)) == 0)) || { echo "cache capacity must be a power of two: $entries" >&2; exit 2; }
 done
 
-codec_dir="$repo/fpc"-"bsel.v2"
+codec_dir="${CODEC_DIR:-$(find "$repo" -maxdepth 1 -type d -name 'fpc-*' | head -n1)}"
+[[ -n "$codec_dir" && -f "$codec_dir/CMakeLists.txt" ]] || { echo "FPC CMake project not found; set CODEC_DIR" >&2; exit 1; }
 build_dir="$codec_dir/build-linux-prefix-only"
-exe="$build_dir/fpc"-"bsel-v2"
 build_seconds=0
 if [[ "$skip_build" == 0 ]]; then
   start=$SECONDS
@@ -80,7 +80,8 @@ if [[ "$skip_build" == 0 ]]; then
   ctest --test-dir "$build_dir" --output-on-failure
   build_seconds=$((SECONDS-start))
 fi
-[[ -x "$exe" ]] || { echo "missing executable: $exe" >&2; exit 1; }
+exe=$(find "$build_dir" -maxdepth 1 -type f -perm -111 | head -n1)
+[[ -x "$exe" ]] || { echo "missing FPC executable: $exe" >&2; exit 1; }
 
 dataset_list="$output_dir/datasets.tsv"
 "$python_bin" - "$dataset_dir" "$dataset_list" <<'PY'
@@ -181,7 +182,7 @@ for work in sorted(p for p in root.iterdir() if p.is_dir() and (p/'pure-fpc.mode
                   'quantized_before_bytes':s['quantized_bytes_before'],'quantized_after_bytes':s['quantized_bytes_after'],
                   'quantized_ratio_before':s['quantized_ratio_before'],'quantized_ratio_after':s['quantized_ratio_after'],
                   'quantized_gain_points':(s['quantized_ratio_before']-s['quantized_ratio_after'])*100,
-                  'static_codebook_bytes':0,'cache_entry_bytes':s['cache_entry_bytes'],
+                  'cache_entry_bytes':s['cache_entry_bytes'],
                   'clock_score_bytes':s['clock_score_bytes'],'predictor_bytes':s['predictor_bytes'],
                   'control_bytes':s['control_bytes'],'runtime_state_bytes':state,'total_extra_bytes':static+state,
                   'algorithm_ratio_with_overhead':(s['algorithm_bytes_after']+state)/original,
