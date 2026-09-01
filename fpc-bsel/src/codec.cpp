@@ -43,13 +43,6 @@ EncodedBlock encode_block(const Bytes& block, const Model& model) {
         best.bytes.insert(best.bytes.end(), fpc.begin(), fpc.end());
     }
 
-    const auto shuffled = fpc_encode(bitshuffle_words16(block));
-    if (1 + shuffled.size() < best.bytes.size()) {
-        best.mode = BlockMode::FpcBitshuffle;
-        best.bytes = {static_cast<std::uint8_t>(BlockMode::FpcBitshuffle)};
-        best.bytes.insert(best.bytes.end(), shuffled.begin(), shuffled.end());
-    }
-
     const auto parts = split_fpc(block);
     auto prefix = pack_tags(parts.tags);
     bool prefix_bsel = false;
@@ -99,9 +92,9 @@ Bytes decode_block(const Bytes& encoded, const Model& model) {
         const auto size = bsel_stream_size(encoded, offset, model.prefix);
         const auto decoded = bsel_decode(slice(encoded, offset, size), model.prefix);
         std::copy(decoded.begin(), decoded.end(), tags.begin());
-        for (const auto tag : tags) if (tag > 7) throw std::runtime_error("invalid decoded FPC tag");
+        for (const auto tag : tags) if (tag > 15) throw std::runtime_error("invalid decoded FPC tag");
     } else {
-        tags = unpack_tags(slice(encoded, offset, 6));
+        tags = unpack_tags(slice(encoded, offset, 8));
     }
     FpcParts parts;
     parts.tags = tags;
@@ -114,7 +107,7 @@ Bytes decode_block(const Bytes& encoded, const Model& model) {
         const auto raw = slice(encoded, offset, raw_residual_size(tags));
         std::size_t raw_offset = 0;
         for (std::size_t word = 0; word < kWordCount; ++word) {
-            if (tags[word] == 7) {
+            if (tags[word] == 15) {
                 std::copy_n(raw.begin() + static_cast<std::ptrdiff_t>(raw_offset), 4,
                             parts.residual_block.begin() + static_cast<std::ptrdiff_t>(word * 4));
                 raw_offset += 4;

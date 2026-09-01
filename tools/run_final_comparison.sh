@@ -5,8 +5,8 @@ usage() {
   cat <<'EOF'
 Usage: bash tools/run_final_comparison.sh DATASET_DIR [OUTPUT_DIR]
 
-Pure-FPC prefix-only pipeline. It evaluates one path on the same test split:
-  pure FPC + dynamic 2B/3B CLOCK prefix cache
+Custom-FPC prefix-only pipeline. It evaluates one path on the same test split:
+  16-pattern 4-bit Custom-FPC + dynamic 2B/3B CLOCK prefix cache
 
 Outputs:
   prefix-all-caches.csv       every dataset/path/cache capacity
@@ -22,7 +22,7 @@ Environment:
   LIMIT_MIB=0            0 uses the complete input file
   JOBS=<nproc>           compiler jobs
   SKIP_BUILD=0           reuse existing Linux build when 1
-  ROUNDTRIP=1            verify pure-FPC test stream
+  ROUNDTRIP=1            verify Custom-FPC and prefix round trips
 EOF
 }
 
@@ -148,11 +148,11 @@ while IFS=$'\t' read -r name source; do
   train_trace="$work/prepared/train.trace"; test_trace="$work/prepared/test.trace"
   split_dataset "$source" "$train_trace" "$test_trace" "$work/split.json"
 
-  pure_model="$work/pure-fpc.model"
+  pure_model="$work/custom-fpc.model"
   start=$SECONDS
   "$python_bin" "$repo/tools/make_empty_fpc_model.py" "$pure_model"
-  echo "$name,pure_fpc_model,$((SECONDS-start))" >> "$timing_raw"
-  path="pure-fpc"; model=$pure_model; path_dir="$work/$path"; mkdir -p "$path_dir"
+  echo "$name,custom_fpc_model,$((SECONDS-start))" >> "$timing_raw"
+  path="custom-fpc"; model=$pure_model; path_dir="$work/$path"; mkdir -p "$path_dir"
     if [[ "$roundtrip" == 1 ]]; then
       "$exe" roundtrip-stream "$model" "$test_trace" | tee "$path_dir/roundtrip.log"
     fi
@@ -179,9 +179,9 @@ def tier_counts(transitions):
         a,b=label.split('->'); source,target=int(a[:-1]),int(b[:-1]); direct=f'{source}K->{target}K'
         if direct in out and target<source: out[direct]+=int(count)
     return out
-for work in sorted(p for p in root.iterdir() if p.is_dir() and (p/'pure-fpc.model').exists()):
+for work in sorted(p for p in root.iterdir() if p.is_dir() and (p/'custom-fpc.model').exists()):
     dataset=work.name
-    for path in ('pure-fpc',):
+    for path in ('custom-fpc',):
         static=0
         for summary_path in sorted((work/path).glob('cache-e*/*-dynamic-prefix-summary.json')):
             for s in json.loads(summary_path.read_text(encoding='utf8')):
@@ -213,7 +213,7 @@ with all_csv.open('w',newline='',encoding='utf8') as f:
     w=csv.DictWriter(f,fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
 best=[]
 for dataset in sorted({r['dataset'] for r in rows}):
-    for path in ('pure-fpc',):
+    for path in ('custom-fpc',):
         candidates=[r for r in rows if r['dataset']==dataset and r['path']==path]
         winner=max(candidates,key=lambda r:(r['total_crossings'],-r['quantized_after_bytes'],-r['algorithm_after_bytes'],-r['total_extra_bytes']))
         best.append(winner)
@@ -222,7 +222,7 @@ with (root/'prefix-best-results.csv').open('w',newline='',encoding='utf8') as f:
 timing_rows=list(csv.DictReader(timing_raw.open(encoding='utf8')))
 with (root/'timing.csv').open('w',newline='',encoding='utf8') as f:
     w=csv.DictWriter(f,fieldnames=('dataset','stage','seconds')); w.writeheader(); w.writerows(timing_rows)
-lines=['# Prefix-only compression results','',
+lines=['# Custom-FPC + dynamic-prefix results','',
 '| Dataset | Path | Cache | 4K→3K | 3K→2K | 2K→1K | 1K→0K | Total | Algorithm ratio | Quantized ratio | Cache state | Total extra |',
 '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
 for r in best:
@@ -237,7 +237,7 @@ lines += ['', '## Quantized contribution by tier','',
 '|---|---|---:|---:|---:|---:|---:|']
 for r in best:
     lines.append(f'| {r["dataset"]} | {r["path"]} | {r["4K->3K_gain_points"]:.4f} pp | {r["3K->2K_gain_points"]:.4f} pp | {r["2K->1K_gain_points"]:.4f} pp | {r["1K->0K_gain_points"]:.4f} pp | {r["quantized_gain_points"]:.4f} pp |')
-lines += ['', '所有配置均按实际payload字节计数并执行round-trip。纯FPC不使用静态码本；动态缓存按4 B/entry、2-bit CLOCK、previous-word和控制寄存器计费。']
+lines += ['', '所有配置均按实际payload字节计数并执行round-trip。Custom-FPC使用固定16-pattern表，不使用静态码本；动态缓存按4 B/entry、2-bit CLOCK、previous-word和控制寄存器计费。']
 (root/'prefix-report.md').write_text('\n'.join(lines)+'\n',encoding='utf8')
 timing_raw.unlink(missing_ok=True)
 print(f'all_caches={all_csv}\nbest={root/"prefix-best-results.csv"}\nreport={root/"prefix-report.md"}\ntiming={root/"timing.csv"}')

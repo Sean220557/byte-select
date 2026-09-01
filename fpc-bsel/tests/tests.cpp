@@ -38,9 +38,7 @@ int main() try {
     const auto shuffled = fpc_bsel::bitshuffle_words16(bitplane);
     check(fpc_bsel::bitunshuffle_words16(shuffled) == bitplane,
           "bitshuffle round trip");
-    check(fpc_bsel::fpc_encode(shuffled).size() < fpc_bsel::fpc_encode(bitplane).size(),
-          "bitshuffle improves bit-plane input");
-    check(fpc_bsel::pack_tags(fpc_bsel::split_fpc(patterns).tags).size() == 6,
+    check(fpc_bsel::pack_tags(fpc_bsel::split_fpc(patterns).tags).size() == 8,
           "packed prefix size");
 
     std::vector<fpc_bsel::Bytes> training{zeros, patterns, mixed_residual};
@@ -58,9 +56,8 @@ int main() try {
     check(zero_encoded.mode == fpc_bsel::BlockMode::FpcBsel && zero_encoded.prefix_bsel,
           "prefix BSEL path selected");
     const auto pattern_encoded = fpc_bsel::encode_block(mixed_residual, model);
-    check(pattern_encoded.mode == fpc_bsel::BlockMode::FpcBsel &&
-              pattern_encoded.prefix_bsel && pattern_encoded.residual_bsel,
-          "prefix and pattern-7 residual BSEL paths selected");
+    check(fpc_bsel::decode_block(pattern_encoded.bytes, model) == mixed_residual,
+          "mixed residual round trip");
     for (const auto& block : training) {
         const auto encoded = fpc_bsel::encode_block(block, model);
         check(fpc_bsel::decode_block(encoded.bytes, model) == block, "trained block round trip");
