@@ -12,7 +12,7 @@ Outputs:
   prefix-all-caches.csv       every dataset/path/cache capacity
   prefix-best-results.csv     crossing-first winner per dataset/path
   prefix-report.md            compact human-readable report
-  timing.csv                  build/train/export/prefix elapsed time
+  timing.csv                  build/model/export/prefix elapsed time
   <dataset>/split.json        exact train/test split
   <dataset>/<path>/...        round-trip logs, summaries, and region CSVs
 
@@ -222,7 +222,7 @@ lines += ['', '## Quantized contribution by tier','',
 '|---|---|---:|---:|---:|---:|---:|']
 for r in best:
     lines.append(f'| {r["dataset"]} | {r["path"]} | {r["4K->3K_gain_points"]:.4f} pp | {r["3K->2K_gain_points"]:.4f} pp | {r["2K->1K_gain_points"]:.4f} pp | {r["1K->0K_gain_points"]:.4f} pp | {r["quantized_gain_points"]:.4f} pp |')
-lines += ['', '所有配置均按实际payload字节计数并执行round-trip。BSEL静态码本按模型文件实际大小计费；动态缓存按4 B/entry、2-bit CLOCK、previous-word和控制寄存器计费。']
+lines += ['', '所有配置均按实际payload字节计数并执行round-trip。纯FPC不使用静态码本；动态缓存按4 B/entry、2-bit CLOCK、previous-word和控制寄存器计费。']
 (root/'prefix-report.md').write_text('\n'.join(lines)+'\n',encoding='utf8')
 timing_raw.unlink(missing_ok=True)
 print(f'all_caches={all_csv}\nbest={root/"prefix-best-results.csv"}\nreport={root/"prefix-report.md"}\ntiming={root/"timing.csv"}')
