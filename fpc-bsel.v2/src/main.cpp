@@ -367,6 +367,7 @@ int main(int argc, char** argv) try {
         std::uint64_t prefix_only_bytes = 0, residual_only_bytes = 0;
         std::uint64_t raw = 0, fpc = 0, bitshuffle = 0, combined = 0;
         std::uint64_t prefix = 0, residual = 0, inline_prefix = 0;
+        std::uint64_t checked_blocks = 0;
         const auto blocks = for_each_stream_block(
             argv[3], chunk_bytes, [&](const Bytes& block) {
                 const auto encoded = fpc_bsel::encode_block(block, model);
@@ -389,7 +390,9 @@ int main(int argc, char** argv) try {
                 }
                 if ((command == "roundtrip-stream" || command == "roundtrip-range") &&
                     fpc_bsel::decode_block(encoded.bytes, model) != block)
-                    throw std::runtime_error("stream round-trip mismatch");
+                    throw std::runtime_error("stream round-trip mismatch at block " +
+                                             std::to_string(checked_blocks));
+                ++checked_blocks;
             }, offset_bytes, length_bytes);
         const auto original_bytes = blocks * fpc_bsel::kBlockSize;
         std::cout << "blocks=" << blocks << " original_bytes=" << original_bytes

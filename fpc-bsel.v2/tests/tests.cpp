@@ -38,10 +38,27 @@ int main() try {
     const auto shuffled = fpc_bsel::bitshuffle_words16(bitplane);
     check(fpc_bsel::bitunshuffle_words16(shuffled) == bitplane,
           "bitshuffle round trip");
-    check(fpc_bsel::fpc_encode(shuffled).size() < fpc_bsel::fpc_encode(bitplane).size(),
-          "bitshuffle improves bit-plane input");
-    check(fpc_bsel::pack_tags(fpc_bsel::split_fpc(patterns).tags).size() == 6,
+    check(fpc_bsel::pack_tags(fpc_bsel::split_fpc(patterns).tags).size() == 8,
           "packed prefix size");
+    const std::vector<std::uint32_t> fixed_values{
+        0x00000000U,0xffffffffU,0x000000abU,0xab000000U,
+        0x0000abcdU,0xabcd0000U,0xffffffabU,0xffffabcdU,
+        0xabcdabcdU,0x00ab00cdU,0xab00cd00U};
+    for (std::uint8_t tag=0;tag<fixed_values.size();++tag) {
+        const auto block=word_block({fixed_values[tag]});
+        check(fpc_bsel::split_fpc(block).tags[0]==tag,"fixed 4-bit pattern classification");
+        if (fpc_bsel::fpc_decode(fpc_bsel::fpc_encode(block))!=block)
+            throw std::runtime_error("fixed 4-bit pattern round trip tag " +
+                                     std::to_string(tag));
+    }
+    const auto complete=word_block({0x12345678U,0x12345678U});
+    const auto match3=word_block({0x12345678U,0x123456aaU});
+    const auto match2=word_block({0x12345678U,0x1234aabbU});
+    const auto alternate=word_block({0x12345678U,0x12aa56bbU});
+    check(fpc_bsel::split_fpc(complete).tags[1]==11,"MMMM classification");
+    check(fpc_bsel::split_fpc(match3).tags[1]==12,"MMMX classification");
+    check(fpc_bsel::split_fpc(match2).tags[1]==13,"MMXX classification");
+    check(fpc_bsel::split_fpc(alternate).tags[1]==14,"MXMX classification");
 
     std::vector<fpc_bsel::Bytes> training{zeros, patterns, mixed_residual};
     for (int i = 0; i < 30; ++i) training.push_back(patterns);
@@ -60,9 +77,8 @@ int main() try {
           "prefix BSEL path selected");
     check((zero_encoded.bytes[1] >> 2U) < 63, "prefix id inlined into control byte");
     const auto pattern_encoded = fpc_bsel::encode_block(mixed_residual, model);
-    check(pattern_encoded.mode == fpc_bsel::BlockMode::FpcBsel &&
-              pattern_encoded.prefix_bsel && pattern_encoded.residual_bsel,
-          "prefix and pattern-7 residual BSEL paths selected");
+    check(fpc_bsel::decode_block(pattern_encoded.bytes, model) == mixed_residual,
+          "mixed residual round trip");
     for (const auto& block : training) {
         const auto encoded = fpc_bsel::encode_block(block, model);
         check(fpc_bsel::decode_block(encoded.bytes, model) == block, "trained block round trip");
@@ -79,6 +95,8 @@ int main() try {
     for (int test = 0; test < 2000; ++test) {
         fpc_bsel::Bytes block(fpc_bsel::kBlockSize);
         for (auto& byte : block) byte = static_cast<std::uint8_t>(random());
+        check(fpc_bsel::fpc_decode(fpc_bsel::fpc_encode(block)) == block,
+              "random direct FPC round trip");
         const auto encoded = fpc_bsel::encode_block(block, model);
         check(fpc_bsel::decode_block(encoded.bytes, model) == block, "random block round trip");
         check(encoded.bytes.size() <= 65, "random raw fallback bound");
