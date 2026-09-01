@@ -90,13 +90,11 @@ if [[ "$skip_build" == 0 ]]; then
 fi
 exe=""
 while IFS= read -r candidate; do
-  if file -b "$candidate" | grep -q 'ELF.*executable'; then
-    candidate_help=$("$candidate" 2>&1 || true)
-    if grep -q 'payloads-256' <<< "$candidate_help"; then
-      exe=$candidate; break
-    fi
+  candidate_help=$("$candidate" 2>&1 || true)
+  if grep -q 'payloads-256' <<< "$candidate_help"; then
+    exe=$candidate; break
   fi
-done < <(find "$build_dir" -maxdepth 1 -type f | sort)
+done < <(find "$build_dir" -maxdepth 1 -type f -name 'fpc-*' ! -name '*tests*' | sort)
 [[ -n "$exe" && -x "$exe" ]] || { echo "missing FPC executable with payload support" >&2; exit 1; }
 
 dataset_list="$output_dir/datasets.tsv"
