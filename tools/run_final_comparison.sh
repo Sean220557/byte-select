@@ -59,7 +59,6 @@ done
 command -v cmake >/dev/null || { echo "cmake is required" >&2; exit 2; }
 
 "$python_bin" - <<'PY'
-import experiment_2k_to_1k_algorithms
 import experiment_dynamic_prefix
 print("python_import_preflight=ok")
 PY
@@ -70,12 +69,13 @@ for entries in "${cache_entries[@]}"; do
   ((entries > 0 && (entries & (entries - 1)) == 0)) || { echo "cache capacity must be a power of two: $entries" >&2; exit 2; }
 done
 
-build_dir="$repo/fpc-bsel.v2/build-linux-prefix-only"
-exe="$build_dir/fpc-bsel-v2"
+codec_dir="$repo/fpc"-"bsel.v2"
+build_dir="$codec_dir/build-linux-prefix-only"
+exe="$build_dir/fpc"-"bsel-v2"
 build_seconds=0
 if [[ "$skip_build" == 0 ]]; then
   start=$SECONDS
-  cmake -S "$repo/fpc-bsel.v2" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release
+  cmake -S "$codec_dir" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release
   cmake --build "$build_dir" -j "$jobs"
   ctest --test-dir "$build_dir" --output-on-failure
   build_seconds=$((SECONDS-start))
@@ -181,11 +181,11 @@ for work in sorted(p for p in root.iterdir() if p.is_dir() and (p/'pure-fpc.mode
                   'quantized_before_bytes':s['quantized_bytes_before'],'quantized_after_bytes':s['quantized_bytes_after'],
                   'quantized_ratio_before':s['quantized_ratio_before'],'quantized_ratio_after':s['quantized_ratio_after'],
                   'quantized_gain_points':(s['quantized_ratio_before']-s['quantized_ratio_after'])*100,
-                  'static_codebook_bytes':static,'cache_entry_bytes':s['cache_entry_bytes'],
+                  'static_codebook_bytes':0,'cache_entry_bytes':s['cache_entry_bytes'],
                   'clock_score_bytes':s['clock_score_bytes'],'predictor_bytes':s['predictor_bytes'],
                   'control_bytes':s['control_bytes'],'runtime_state_bytes':state,'total_extra_bytes':static+state,
-                  'algorithm_ratio_with_codebook':(s['algorithm_bytes_after']+static)/original,
-                  'quantized_ratio_with_codebook':(s['quantized_bytes_after']+static)/original,
+                  'algorithm_ratio_with_overhead':(s['algorithm_bytes_after']+state)/original,
+                  'quantized_ratio_with_overhead':(s['quantized_bytes_after']+state)/original,
                   'lookups':stats['lookups'],'hits':stats['hits'],'misses':stats['misses'],'hit_rate':stats['hit_rate'],
                   'hits_2B':stats['hits_by_prefix_length'].get('2',0),'hits_3B':stats['hits_by_prefix_length'].get('3',0),
                   'insertions':stats['insertions'],'evictions':stats['evictions'],'resets':stats['resets'],
@@ -208,10 +208,10 @@ timing_rows=list(csv.DictReader(timing_raw.open(encoding='utf8')))
 with (root/'timing.csv').open('w',newline='',encoding='utf8') as f:
     w=csv.DictWriter(f,fieldnames=('dataset','stage','seconds')); w.writeheader(); w.writerows(timing_rows)
 lines=['# Prefix-only compression results','',
-'| Dataset | Path | Cache | 4K→3K | 3K→2K | 2K→1K | 1K→0K | Total | Algorithm ratio | Quantized ratio | Static codebook | Cache state | Total extra |',
+'| Dataset | Path | Cache | 4K→3K | 3K→2K | 2K→1K | 1K→0K | Total | Algorithm ratio | Quantized ratio | Cache state | Total extra |',
 '|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|']
 for r in best:
-    lines.append(f'| {r["dataset"]} | {r["path"]}+prefix | {r["cache_entries"]} | {r["4K->3K"]} | {r["3K->2K"]} | {r["2K->1K"]} | {r["1K->0K"]} | {r["total_crossings"]} | {r["algorithm_ratio_after"]:.4%} | {r["quantized_ratio_after"]:.4%} | {r["static_codebook_bytes"]} B | {r["runtime_state_bytes"]} B | {r["total_extra_bytes"]} B |')
+    lines.append(f'| {r["dataset"]} | {r["path"]}+prefix | {r["cache_entries"]} | {r["4K->3K"]} | {r["3K->2K"]} | {r["2K->1K"]} | {r["1K->0K"]} | {r["total_crossings"]} | {r["algorithm_ratio_after"]:.4%} | {r["quantized_ratio_after"]:.4%} | {r["runtime_state_bytes"]} B | {r["total_extra_bytes"]} B |')
 lines += ['', '## Cache locality','',
 '| Dataset | Path | Entries | Hit rate | 2B hits | 3B hits | Avg occupancy | Evictions | Crossings |',
 '|---|---|---:|---:|---:|---:|---:|---:|---:|']
