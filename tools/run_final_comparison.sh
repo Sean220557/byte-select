@@ -5,10 +5,8 @@ usage() {
   cat <<'EOF'
 Usage: bash tools/run_final_comparison.sh DATASET_DIR [OUTPUT_DIR]
 
-Prefix-only pipeline. It builds FPC+BSEL, trains one model per dataset, and
-compares two paths on the same test split:
-  1. FPC+BSEL + dynamic 2B/3B CLOCK prefix cache
-  2. pure FPC + dynamic 2B/3B CLOCK prefix cache
+Pure-FPC prefix-only pipeline. It evaluates one path on the same test split:
+  pure FPC + dynamic 2B/3B CLOCK prefix cache
 
 Outputs:
   prefix-all-caches.csv       every dataset/path/cache capacity
@@ -20,11 +18,11 @@ Outputs:
 
 Environment:
   PREFIX_CACHE_ENTRIES=64,128,256,512
-  TRAIN_PERCENT=20       FPC+BSEL training prefix; remainder is sealed test
+  TRAIN_PERCENT=20       retained for split compatibility; no model training
   LIMIT_MIB=0            0 uses the complete input file
   JOBS=<nproc>           compiler jobs
   SKIP_BUILD=0           reuse existing Linux build when 1
-  ROUNDTRIP=1            verify FPC+BSEL and pure-FPC test streams
+  ROUNDTRIP=1            verify pure-FPC test stream
 EOF
 }
 
@@ -135,15 +133,11 @@ while IFS=$'\t' read -r name source; do
   train_trace="$work/prepared/train.trace"; test_trace="$work/prepared/test.trace"
   split_dataset "$source" "$train_trace" "$test_trace" "$work/split.json"
 
-  bsel_model="$work/fpc-bsel.model"; pure_model="$work/pure-fpc.model"
+  pure_model="$work/pure-fpc.model"
   start=$SECONDS
-  "$exe" train-stream "$train_trace" "$bsel_model" --max-patterns 256 | tee "$work/fpc-bsel-train.log"
-  echo "$name,fpc_bsel_train,$((SECONDS-start))" >> "$timing_raw"
   "$python_bin" "$repo/tools/make_empty_fpc_model.py" "$pure_model"
-
-  for path in fpc-bsel pure-fpc; do
-    [[ "$path" == fpc-bsel ]] && model=$bsel_model || model=$pure_model
-    path_dir="$work/$path"; mkdir -p "$path_dir"
+  echo "$name,pure_fpc_model,$((SECONDS-start))" >> "$timing_raw"
+  path="pure-fpc"; model=$pure_model; path_dir="$work/$path"; mkdir -p "$path_dir"
     if [[ "$roundtrip" == 1 ]]; then
       "$exe" roundtrip-stream "$model" "$test_trace" | tee "$path_dir/roundtrip.log"
     fi
@@ -158,7 +152,6 @@ while IFS=$'\t' read -r name source; do
         --previous-prefix --cache-policy clock | tee "$run_dir/run.log"
       echo "$name,${path}_prefix_e${entries},$((SECONDS-start))" >> "$timing_raw"
     done
-  done
 done < "$dataset_list"
 
 "$python_bin" - "$output_dir" "$timing_raw" <<'PY'
@@ -171,10 +164,10 @@ def tier_counts(transitions):
         a,b=label.split('->'); source,target=int(a[:-1]),int(b[:-1]); direct=f'{source}K->{target}K'
         if direct in out and target<source: out[direct]+=int(count)
     return out
-for work in sorted(p for p in root.iterdir() if p.is_dir() and (p/'fpc-bsel.model').exists()):
-    dataset=work.name; bsel_bytes=(work/'fpc-bsel.model').stat().st_size
-    for path in ('fpc-bsel','pure-fpc'):
-        static=bsel_bytes if path=='fpc-bsel' else 0
+for work in sorted(p for p in root.iterdir() if p.is_dir() and (p/'pure-fpc.model').exists()):
+    dataset=work.name
+    for path in ('pure-fpc',):
+        static=0
         for summary_path in sorted((work/path).glob('cache-e*/*-dynamic-prefix-summary.json')):
             for s in json.loads(summary_path.read_text(encoding='utf8')):
                 stats=s['cache_stats']; counts=tier_counts(s['transitions']); original=int(s['regions'])*4096
@@ -205,7 +198,7 @@ with all_csv.open('w',newline='',encoding='utf8') as f:
     w=csv.DictWriter(f,fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
 best=[]
 for dataset in sorted({r['dataset'] for r in rows}):
-    for path in ('fpc-bsel','pure-fpc'):
+    for path in ('pure-fpc',):
         candidates=[r for r in rows if r['dataset']==dataset and r['path']==path]
         winner=max(candidates,key=lambda r:(r['total_crossings'],-r['quantized_after_bytes'],-r['algorithm_after_bytes'],-r['total_extra_bytes']))
         best.append(winner)
