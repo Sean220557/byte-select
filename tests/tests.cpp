@@ -136,8 +136,8 @@ void test_lazy_selection_property() {
 
 void test_baseline_size_evaluators() {
     const bsel::Block zeros(64, 0);
-    check(bsel::fpc_encoded_size(zeros) == 6,
-          "FPC stores an all-zero 64-byte line as the 48-bit prefix header");
+    check(bsel::fpc_encoded_size(zeros) == 8,
+          "Custom FPC stores sixteen 4-bit prefixes in eight bytes");
     check(bsel::bdi_encoded_size(zeros) == 1,
           "BDI zero encoding uses the Table-2 one-byte representation");
 
@@ -152,8 +152,8 @@ void test_baseline_size_evaluators() {
     for (std::size_t i = 0; i < 16; ++i) {
         store_little_endian(small_words, i * 4, 0x0000007fU, 4);
     }
-    check(bsel::fpc_encoded_size(small_words) == 22,
-          "FPC accounts for its 48-bit header and sixteen one-byte payloads");
+    check(bsel::fpc_encoded_size(small_words) == 13,
+          "Custom FPC uses one literal byte and fifteen 2-bit matches");
 
     bsel::Block raw(64);
     std::uint32_t state = 0x31415926U;
@@ -169,9 +169,9 @@ void test_baseline_size_evaluators() {
         store_little_endian(bitshuffle_friendly, word * 4,
                             0xdeadbeefU ^ (std::uint32_t{1} << word), 4);
     }
-    check(bsel::fpc_encoded_size(bitshuffle_friendly) <
-              bsel::fpc_encode(bitshuffle_friendly).size(),
-          "FPC encoded-size estimator uses bit-shuffle when it is smaller");
+    check(bsel::fpc_encoded_size(bitshuffle_friendly) ==
+              std::min(bitshuffle_friendly.size(), bsel::fpc_encode(bitshuffle_friendly).size()),
+          "Custom FPC uses the direct 16-word layout without bit shuffle");
 
     const auto top256_model = bsel::train_fpc_top256({raw});
     check(bsel::fpc_top256_encoded_size(raw, top256_model) < bsel::fpc_encoded_size(raw),
@@ -276,7 +276,7 @@ void test_baseline_size_evaluators() {
           "software baselines do not expand random cache lines");
     const auto fpc_stream = bsel::fpc_encode(small_words);
     const auto huffman_stream = bsel::huffman_encode(repeated64);
-    check(fpc_stream.size() == 22 &&
+    check(fpc_stream.size() == 13 &&
               bsel::fpc_decode(fpc_stream, small_words.size()) == small_words,
           "FPC size comes from a round-trippable tag/payload bitstream");
     check(huffman_stream.size() < repeated64.size() &&

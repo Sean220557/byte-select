@@ -323,49 +323,43 @@ std::vector<std::uint8_t> fpc_encode(const Block& block) {
     if (block.empty() || block.size() % 4 != 0) {
         throw std::invalid_argument("FPC requires a non-empty block divisible by four bytes");
     }
-    std::vector<std::uint32_t> values;
-    std::vector<std::uint8_t> tags;
-    values.reserve(block.size() / 4);
-    tags.reserve(block.size() / 4);
-    auto classify = [](std::uint32_t value) {
-        if (value == 0) return std::uint8_t{0};
-        if (is_sign_extended(value, 4)) return std::uint8_t{1};
-        const auto byte = static_cast<std::uint8_t>(value);
-        if (((value >> 8U) & 0xffU) == byte &&
-            ((value >> 16U) & 0xffU) == byte &&
-            ((value >> 24U) & 0xffU) == byte) return std::uint8_t{2};
-        if (is_sign_extended(value, 8)) return std::uint8_t{3};
-        if (is_sign_extended(value, 16)) return std::uint8_t{4};
-        if ((value & 0xffffU) == 0) return std::uint8_t{5};
-        if (halfword_is_sign_extended_byte(static_cast<std::uint16_t>(value)) &&
-            halfword_is_sign_extended_byte(static_cast<std::uint16_t>(value >> 16U)))
-            return std::uint8_t{6};
-        return std::uint8_t{7};
-    };
-    auto write_payload = [](BitWriter& writer, std::uint8_t tag, std::uint32_t value) {
+    struct Choice { std::uint8_t tag=15, dict=0; };
+    static constexpr unsigned widths[]={0,0,8,8,16,16,8,16,16,16,16,2,10,18,18,32};
+    auto byte=[](std::uint32_t v,unsigned i){return static_cast<std::uint8_t>(v>>(i*8U));};
+    std::vector<std::uint32_t> values(block.size()/4);
+    std::vector<Choice> choices(values.size());
+    std::vector<std::uint8_t> tags(values.size());
+    for(std::size_t i=0;i<values.size();++i) values[i]=static_cast<std::uint32_t>(load_little_endian(block,i*4,4));
+    for(std::size_t i=0;i<values.size();++i){
+        const auto v=values[i]; const auto b0=byte(v,0),b1=byte(v,1),b2=byte(v,2),b3=byte(v,3);
+        Choice best{}; auto take=[&](std::uint8_t t){if(widths[t]<widths[best.tag])best={t,0};};
+        if(v==0)take(0); if(v==0xffffffffU)take(1); if(b3==0&&b2==0&&b1==0)take(2);
+        if(b2==0&&b1==0&&b0==0)take(3); if(b3==0&&b2==0)take(4); if(b1==0&&b0==0)take(5);
+        if(b3==0xff&&b2==0xff&&b1==0xff)take(6); if(b3==0xff&&b2==0xff)take(7);
+        if(b3==b1&&b2==b0)take(8); if(b3==0&&b1==0)take(9); if(b2==0&&b0==0)take(10);
+        for(std::size_t d=1;d<=4&&d<=i;++d){const auto o=values[i-d];std::uint8_t t=15;
+            if(v==o)t=11;else if(b3==byte(o,3)&&b2==byte(o,2)&&b1==byte(o,1))t=12;
+            else if(b3==byte(o,3)&&b2==byte(o,2))t=13;else if(b3==byte(o,3)&&b1==byte(o,1))t=14;
+            if(widths[t]<widths[best.tag])best={t,static_cast<std::uint8_t>(d-1)};}
+        choices[i]=best; tags[i]=best.tag;
+    }
+    auto write_payload = [&](BitWriter& writer, Choice choice, std::uint32_t value) {
+        const auto tag=choice.tag;
         switch (tag) {
-            case 0: break;
-            case 1: writer.put(value & 0xfU, 4); break;
-            case 2:
-            case 3: writer.put(value & 0xffU, 8); break;
-            case 4: writer.put(value & 0xffffU, 16); break;
-            case 5: writer.put(value >> 16U, 16); break;
-            case 6:
-                writer.put(value & 0xffU, 8);
-                writer.put((value >> 16U) & 0xffU, 8);
-                break;
-            case 7: writer.put(value, 32); break;
+            case 0:case 1:break; case 2:case 6:writer.put(byte(value,0),8);break;
+            case 3:writer.put(byte(value,3),8);break; case 4:case 7:case 8:writer.put(value&0xffffU,16);break;
+            case 5:writer.put(value>>16U,16);break; case 9:writer.put(byte(value,2),8);writer.put(byte(value,0),8);break;
+            case 10:writer.put(byte(value,3),8);writer.put(byte(value,1),8);break;
+            case 11:writer.put(choice.dict,2);break; case 12:writer.put(choice.dict,2);writer.put(byte(value,0),8);break;
+            case 13:writer.put(choice.dict,2);writer.put(value&0xffffU,16);break;
+            case 14:writer.put(choice.dict,2);writer.put(byte(value,2),8);writer.put(byte(value,0),8);break;
+            case 15:writer.put(value,32);break;
             default: throw std::runtime_error("invalid FPC tag");
         }
     };
-    for (std::size_t offset = 0; offset < block.size(); offset += 4) {
-        const auto value = static_cast<std::uint32_t>(load_little_endian(block, offset, 4));
-        values.push_back(value);
-        tags.push_back(classify(value));
-    }
     BitWriter writer;
-    for (const auto tag : tags) writer.put(tag, 3);
-    for (std::size_t i = 0; i < values.size(); ++i) write_payload(writer, tags[i], values[i]);
+    for (const auto tag : tags) writer.put(tag, 4);
+    for (std::size_t i = 0; i < values.size(); ++i) write_payload(writer, choices[i], values[i]);
     return writer.bytes();
 }
 
@@ -449,31 +443,24 @@ Block fpc_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_si
     std::vector<std::uint8_t> tags;
     tags.reserve(words);
     for (std::size_t word = 0; word < words; ++word)
-        tags.push_back(static_cast<std::uint8_t>(reader.get(3)));
+        tags.push_back(static_cast<std::uint8_t>(reader.get(4)));
     Block output;
     output.reserve(output_size);
+    std::vector<std::uint32_t> history; history.reserve(words);
+    auto dict=[&](){const auto i=static_cast<std::size_t>(reader.get(2));if(i>=history.size()||i>=4)throw std::runtime_error("invalid FPC dictionary index");return history[history.size()-i-1];};
     for (const auto tag : tags) {
         std::uint32_t value = 0;
         switch (tag) {
-            case 0: break;
-            case 1: value = static_cast<std::uint32_t>(sign_extend(reader.get(4), 4)); break;
-            case 2: {
-                const auto byte = static_cast<std::uint32_t>(reader.get(8));
-                value = byte * 0x01010101U;
-                break;
-            }
-            case 3: value = static_cast<std::uint32_t>(sign_extend(reader.get(8), 8)); break;
-            case 4: value = static_cast<std::uint32_t>(sign_extend(reader.get(16), 16)); break;
-            case 5: value = static_cast<std::uint32_t>(reader.get(16)) << 16U; break;
-            case 6: {
-                const auto low = static_cast<std::uint32_t>(sign_extend(reader.get(8), 8));
-                const auto high = static_cast<std::uint32_t>(sign_extend(reader.get(8), 8));
-                value = (low & 0xffffU) | (high << 16U);
-                break;
-            }
-            case 7: value = static_cast<std::uint32_t>(reader.get(32)); break;
+            case 0:break;case 1:value=0xffffffffU;break;case 2:value=reader.get(8);break;case 3:value=reader.get(8)<<24U;break;
+            case 4:value=reader.get(16);break;case 5:value=reader.get(16)<<16U;break;case 6:value=0xffffff00U|reader.get(8);break;
+            case 7:value=0xffff0000U|reader.get(16);break;case 8:{auto h=reader.get(16);value=h|(h<<16U);break;}
+            case 9:{auto a=reader.get(8),b=reader.get(8);value=(a<<16U)|b;break;}case 10:{auto a=reader.get(8),b=reader.get(8);value=(a<<24U)|(b<<8U);break;}
+            case 11:value=dict();break;case 12:{auto d=dict();value=(d&0xffffff00U)|reader.get(8);break;}
+            case 13:{auto d=dict();value=(d&0xffff0000U)|reader.get(16);break;}case 14:{auto d=dict();auto b2=reader.get(8),b0=reader.get(8);value=(d&0xff00ff00U)|(b2<<16U)|b0;break;}
+            case 15:value=reader.get(32);break;
             default: throw std::runtime_error("invalid FPC tag");
         }
+        history.push_back(value);
         for (unsigned byte = 0; byte < 4; ++byte) {
             output.push_back(static_cast<std::uint8_t>(value >> (8U * byte)));
         }
@@ -483,8 +470,7 @@ Block fpc_decode(const std::vector<std::uint8_t>& encoded, std::size_t output_si
 
 std::size_t fpc_encoded_size(const Block& block) {
     const auto direct = fpc_encode(block).size();
-    const auto shuffled = fpc_encode(bit_shuffle_words32(block)).size();
-    return std::min({direct, shuffled, block.size()});
+    return std::min(direct, block.size());
 }
 
 FpcTop256Model train_fpc_top256(const std::vector<Block>& blocks) {
