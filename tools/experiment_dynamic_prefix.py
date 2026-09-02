@@ -38,24 +38,35 @@ class PrefixCache:
         self.entries: list[bytes] = []
         self.scores: list[int] = []
         self.contexts: list[int] = []
+        # Direct lookup replaces the former full-cache linear scan.  The key
+        # includes context only when contextual mode is enabled.
+        self.index: dict[tuple[bytes, int], int] = {}
         self.next_slot = 0
 
     def clear(self) -> None:
         self.entries.clear()
         self.scores.clear()
         self.contexts.clear()
+        self.index.clear()
         self.next_slot = 0
         if self.stats is not None:
             self.stats["resets"] += 1
 
     def best(self, chunk: bytes, context: int = 0) -> tuple[int, bytes] | None:
-        matches = [
-            (idx, prefix)
-            for idx, prefix in enumerate(self.entries)
-            if len(prefix) < len(chunk) and chunk.startswith(prefix)
-            and (not self.contextual or self.contexts[idx] == context)
-        ]
-        result = max(matches, key=lambda item: len(item[1]), default=None)
+        # There are only a handful of configured prefix lengths (normally 2B
+        # and 3B), so probing exact slices is O(number of lengths), independent
+        # of cache capacity.
+        result = None
+        # Probe longest prefixes first.  A hit at the longest configured
+        # length is already optimal, so shorter probes are skipped.
+        for length in sorted(self.prefix_lengths, reverse=True):
+            if length >= len(chunk):
+                continue
+            prefix = chunk[:length]
+            idx = self.index.get((prefix, context if self.contextual else 0))
+            if idx is not None:
+                result = (idx, prefix)
+                break
         if self.stats is not None:
             self.stats["lookups"] += 1
             self.stats["occupancy_sum"] += len(self.entries)
@@ -90,20 +101,25 @@ class PrefixCache:
             if length >= len(chunk):
                 continue
             prefix = chunk[:length]
-            if any(prefix == value and (not self.contextual or self.contexts[idx] == context)
-                   for idx, value in enumerate(self.entries)):
+            key = (prefix, context if self.contextual else 0)
+            if key in self.index:
                 continue
             if len(self.entries) < self.capacity:
+                slot = len(self.entries)
                 self.entries.append(prefix)
                 self.scores.append(0)
                 self.contexts.append(context)
+                self.index[key] = slot
                 if self.stats is not None:
                     self.stats["insertions"] += 1
             else:
                 slot = self._replacement_slot()
+                old_key = (self.entries[slot], self.contexts[slot] if self.contextual else 0)
+                self.index.pop(old_key, None)
                 self.entries[slot] = prefix
                 self.scores[slot] = 0
                 self.contexts[slot] = context
+                self.index[key] = slot
                 if self.stats is not None:
                     self.stats["evictions"] += 1
 
@@ -326,7 +342,6 @@ def evaluate(
     cache_runs: bool = False,
     context_bits: int = 0,
 ):
-    regions = [region for region in regions if len(region.raw_blob()) <= 4096]
     rows = []
     algorithm_before = algorithm_after = quantized_before = quantized_after = 0
     transitions: dict[str, int] = {}
@@ -347,27 +362,33 @@ def evaluate(
         )
         if decoded != baseline:
             raise RuntimeError(f"round-trip mismatch in region {region.index}")
-        chosen = min(len(baseline), len(encoded))
-        before_tier = tier_kib(len(baseline))
+        # A region whose Custom-FPC representation (including the 16 length
+        # fields) exceeds 4 KiB falls back to its original 4 KiB bytes.  Keep
+        # it in the experiment: the prefix stage may still rescue it below a
+        # tier boundary even though the first-stage representation expanded.
+        baseline_size = min(len(baseline), 4096)
+        chosen = min(baseline_size, len(encoded))
+        before_tier = tier_kib(baseline_size)
         after_tier = tier_kib(chosen)
         transition = f"{before_tier}K->{after_tier}K"
         transitions[transition] = transitions.get(transition, 0) + 1
         if after_tier < before_tier:
             crossed += 1
-        algorithm_before += len(baseline)
+        algorithm_before += baseline_size
         algorithm_after += chosen
         quantized_before += before_tier * 1024
         quantized_after += after_tier * 1024
         rows.append({
             "region": region.index,
             "method": method,
-            "before_raw": len(baseline),
+            "before_raw": baseline_size,
+            "custom_fpc_stream_raw": len(baseline),
             "encoded_raw": len(encoded),
             "chosen_raw": chosen,
             "before_tier_kib": before_tier,
             "after_tier_kib": after_tier,
             "crossed": int(after_tier < before_tier),
-            "raw_saved": len(baseline) - chosen,
+            "raw_saved": baseline_size - chosen,
         })
     original = len(regions) * 4096
     entry_bytes = entries * 4

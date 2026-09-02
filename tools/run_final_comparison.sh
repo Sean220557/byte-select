@@ -18,7 +18,7 @@ Outputs:
 
 Environment:
   PREFIX_CACHE_ENTRIES=64,128,256,512
-  TRAIN_PERCENT=20       retained for split compatibility; no model training
+  TRAIN_PERCENT=0        Custom-FPC does not train; 0 evaluates every region
   LIMIT_MIB=0            0 uses the complete input file
   JOBS=<nproc>           compiler jobs
   SKIP_BUILD=0           reuse existing Linux build when 1
@@ -36,7 +36,7 @@ output_dir=${2:-"$repo/results/prefix-only"}
 mkdir -p "$output_dir"
 output_dir=$(realpath "$output_dir")
 
-train_percent=${TRAIN_PERCENT:-20}
+train_percent=${TRAIN_PERCENT:-0}
 limit_mib=${LIMIT_MIB:-0}
 jobs=${JOBS:-$(nproc)}
 skip_build=${SKIP_BUILD:-0}
@@ -47,7 +47,7 @@ cache_entries_csv=${PREFIX_CACHE_ENTRIES:-64,128,256,512}
 for value in "$train_percent" "$limit_mib" "$jobs"; do
   [[ "$value" =~ ^[0-9]+$ ]] || { echo "numeric settings must be non-negative integers" >&2; exit 2; }
 done
-((train_percent > 0 && train_percent < 100 && jobs > 0)) || { echo "invalid TRAIN_PERCENT or JOBS" >&2; exit 2; }
+((train_percent >= 0 && train_percent < 100 && jobs > 0)) || { echo "invalid TRAIN_PERCENT or JOBS" >&2; exit 2; }
 [[ "$skip_build" == 0 || "$skip_build" == 1 ]] || { echo "SKIP_BUILD must be 0 or 1" >&2; exit 2; }
 [[ "$roundtrip" == 0 || "$roundtrip" == 1 ]] || { echo "ROUNDTRIP must be 0 or 1" >&2; exit 2; }
 
@@ -123,7 +123,7 @@ if limit_mib: usable=min(usable,limit_mib*1024*1024)
 usable=usable//4096*4096
 if usable<2*4096: raise SystemExit(f'{src} needs at least two complete 4KiB regions')
 train_bytes=usable*train_pct//100//4096*4096; test_bytes=usable-train_bytes
-if min(train_bytes,test_bytes)<=0: raise SystemExit('empty train/test split')
+if test_bytes<=0: raise SystemExit('empty test split')
 for p in (train,test): p.parent.mkdir(parents=True,exist_ok=True)
 with src.open('rb') as inp:
     for path,size in ((train,train_bytes),(test,test_bytes)):
