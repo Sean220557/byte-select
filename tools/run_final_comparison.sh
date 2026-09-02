@@ -76,16 +76,9 @@ for entries in "${cache_entries[@]}"; do
   ((entries > 0 && (entries & (entries - 1)) == 0)) || { echo "cache capacity must be a power of two: $entries" >&2; exit 2; }
 done
 
-codec_dir="${CODEC_DIR:-}"
-if [[ -z "$codec_dir" ]]; then
-  while IFS= read -r main_source; do
-    if grep -q 'payloads-256' "$main_source"; then
-      codec_dir=$(dirname "$(dirname "$main_source")")
-      break
-    fi
-  done < <(find "$repo" -maxdepth 3 -type f -path '*/src/main.cpp' | sort)
-fi
-[[ -n "$codec_dir" && -f "$codec_dir/CMakeLists.txt" ]] || { echo "FPC CMake project not found; set CODEC_DIR" >&2; exit 1; }
+codec_dir="${CODEC_DIR:-$repo/fpc-bsel.v2}"
+[[ -f "$codec_dir/CMakeLists.txt" ]] || { echo "Custom-FPC CMake project not found: $codec_dir" >&2; exit 1; }
+[[ -f "$codec_dir/src/bsel.cpp" ]] || { echo "missing build compatibility source: $codec_dir/src/bsel.cpp" >&2; exit 1; }
 build_dir="$codec_dir/build-linux-prefix-only"
 build_seconds=0
 if [[ "$skip_build" == 0 ]]; then
@@ -95,13 +88,7 @@ if [[ "$skip_build" == 0 ]]; then
   ctest --test-dir "$build_dir" --output-on-failure
   build_seconds=$((SECONDS-start))
 fi
-exe=""
-while IFS= read -r candidate; do
-  candidate_help=$("$candidate" 2>&1 || true)
-  if grep -q 'payloads-256' <<< "$candidate_help"; then
-    exe=$candidate; break
-  fi
-done < <(find "$build_dir" -maxdepth 1 -type f -name 'fpc-*' ! -name '*tests*' | sort)
+exe="$build_dir/fpc-bsel-v2"
 [[ -n "$exe" && -x "$exe" ]] || { echo "missing FPC executable with payload support" >&2; exit 1; }
 
 dataset_list="$output_dir/datasets.tsv"
