@@ -104,7 +104,9 @@ files=[p for p in files if p.suffix.lower() in {'.trace','.bin','.dat','.log'} a
 if not files: raise SystemExit('no .trace/.bin/.dat/.log dataset files found')
 with output.open('w',encoding='utf8') as out:
     for path in files:
-        rel=(path.name if mode == 'file' else str(path.relative_to(root))).removesuffix(path.suffix)
+        rel = path.name if mode == 'file' else str(path.relative_to(root))
+        if rel.endswith(path.suffix):
+            rel = rel[:-len(path.suffix)]
         name=str(rel).replace('/','__').replace('\\','__').replace(' ','_')
         out.write(f'{name}\t{path.resolve()}\n')
 print(f'datasets={len(files)}')
