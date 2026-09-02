@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: bash tools/run_final_comparison.sh DATASET_DIR [OUTPUT_DIR]
+Usage: bash tools/run_final_comparison.sh DATASET_PATH [OUTPUT_DIR]
 
 Custom-FPC prefix-only pipeline. It evaluates one path on the same test split:
   16-pattern 4-bit Custom-FPC + dynamic 2B/3B CLOCK prefix cache
@@ -43,7 +43,14 @@ skip_build=${SKIP_BUILD:-0}
 roundtrip=${ROUNDTRIP:-1}
 cache_entries_csv=${PREFIX_CACHE_ENTRIES:-64,128,256,512}
 
-[[ -d "$dataset_dir" ]] || { echo "not a dataset directory: $dataset_dir" >&2; exit 2; }
+[[ -e "$dataset_dir" ]] || { echo "dataset path does not exist: $dataset_dir" >&2; exit 2; }
+if [[ -f "$dataset_dir" ]]; then
+  dataset_mode=file
+elif [[ -d "$dataset_dir" ]]; then
+  dataset_mode=directory
+else
+  echo "dataset path must be a file or directory: $dataset_dir" >&2; exit 2
+fi
 for value in "$train_percent" "$limit_mib" "$jobs"; do
   [[ "$value" =~ ^[0-9]+$ ]] || { echo "numeric settings must be non-negative integers" >&2; exit 2; }
 done
@@ -98,15 +105,19 @@ done < <(find "$build_dir" -maxdepth 1 -type f -name 'fpc-*' ! -name '*tests*' |
 [[ -n "$exe" && -x "$exe" ]] || { echo "missing FPC executable with payload support" >&2; exit 1; }
 
 dataset_list="$output_dir/datasets.tsv"
-"$python_bin" - "$dataset_dir" "$dataset_list" <<'PY'
+"$python_bin" - "$dataset_dir" "$dataset_list" "$dataset_mode" <<'PY'
 from pathlib import Path
 import sys
-root,output=map(Path,sys.argv[1:])
-files=[p for p in sorted(root.rglob('*')) if p.is_file() and p.suffix.lower() in {'.trace','.bin','.dat','.log'}]
+root,output=map(Path,sys.argv[1:3]); mode=sys.argv[3]
+if mode == 'file':
+    files=[root]
+else:
+    files=[p for p in sorted(root.rglob('*')) if p.is_file() and p.suffix.lower() in {'.trace','.bin','.dat','.log'}]
+files=[p for p in files if p.suffix.lower() in {'.trace','.bin','.dat','.log'} and p.stat().st_size > 0]
 if not files: raise SystemExit('no .trace/.bin/.dat/.log dataset files found')
 with output.open('w',encoding='utf8') as out:
     for path in files:
-        rel=path.relative_to(root).with_suffix('')
+        rel=(path.name if mode == 'file' else str(path.relative_to(root))).removesuffix(path.suffix)
         name=str(rel).replace('/','__').replace('\\','__').replace(' ','_')
         out.write(f'{name}\t{path.resolve()}\n')
 print(f'datasets={len(files)}')
