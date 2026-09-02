@@ -38,6 +38,7 @@ class PrefixCache:
         self.entries: list[bytes] = []
         self.scores: list[int] = []
         self.contexts: list[int] = []
+        self.lookup_lengths = tuple(sorted(self.prefix_lengths, reverse=True))
         # Direct lookup replaces the former full-cache linear scan.  The key
         # includes context only when contextual mode is enabled.
         self.index: dict[tuple[bytes, int], int] = {}
@@ -59,7 +60,7 @@ class PrefixCache:
         result = None
         # Probe longest prefixes first.  A hit at the longest configured
         # length is already optimal, so shorter probes are skipped.
-        for length in sorted(self.prefix_lengths, reverse=True):
+        for length in self.lookup_lengths:
             if length >= len(chunk):
                 continue
             prefix = chunk[:length]
