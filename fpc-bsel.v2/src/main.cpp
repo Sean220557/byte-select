@@ -178,6 +178,14 @@ void usage() {
 int main(int argc, char** argv) try {
     if (argc < 2) { usage(); return 1; }
     const std::string command = argv[1];
+    if (command == "make-empty-model") {
+        if (argc != 3) throw std::invalid_argument("usage: fpc-bsel make-empty-model OUTPUT");
+        fpc_bsel::Model model;
+        model.prefix.block_size = 16;
+        model.residual.block_size = 64;
+        fpc_bsel::save_model(model, argv[2]);
+        return 0;
+    }
     if (command == "payloads-256") {
         if (argc != 5)
             throw std::invalid_argument("usage: fpc-bsel payloads-256 MODEL INPUT OUTPUT");
