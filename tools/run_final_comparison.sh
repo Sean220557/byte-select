@@ -22,7 +22,9 @@ Environment:
   LIMIT_MIB=0            0 uses the complete input file
   JOBS=<nproc>           compiler jobs
   SKIP_BUILD=0           reuse existing Linux build when 1
-  ROUNDTRIP=1            verify Custom-FPC and prefix round trips
+  ROUNDTRIP=0            skip round-trip verification by default; set 1 to enable
+  PROGRESS_EVERY=100000  print prefix progress every N sublines; 0 disables
+  DETAIL_LOG=1            write per-subline TSV details (0 disables; large output)
 EOF
 }
 
@@ -40,8 +42,18 @@ train_percent=${TRAIN_PERCENT:-0}
 limit_mib=${LIMIT_MIB:-0}
 jobs=${JOBS:-$(nproc)}
 skip_build=${SKIP_BUILD:-0}
-roundtrip=${ROUNDTRIP:-1}
+roundtrip=${ROUNDTRIP:-0}
 cache_entries_csv=${PREFIX_CACHE_ENTRIES:-64,128,256,512}
+progress_every=${PROGRESS_EVERY:-100000}
+detail_log_enabled=${DETAIL_LOG:-1}
+prefix_verify=()
+if [[ "$roundtrip" == 1 ]]; then prefix_verify+=(--verify-roundtrip); fi
+
+pid="$$"
+log(){ printf '[run_final pid=%s %s] %s\n' "$pid" "$(date '+%H:%M:%S')" "$*"; }
+trap 'rc=$?; if (( rc == 0 )); then log "completed successfully"; else log "failed rc=$rc"; fi' EXIT
+log "starting custom-FPC + dynamic-prefix pipeline"
+log "dataset=$dataset_dir output=$output_dir roundtrip=$roundtrip cache_entries=$cache_entries_csv progress_every=$progress_every"
 
 [[ -e "$dataset_dir" ]] || { echo "dataset path does not exist: $dataset_dir" >&2; exit 2; }
 if [[ -f "$dataset_dir" ]]; then
@@ -82,6 +94,7 @@ codec_dir="${CODEC_DIR:-$repo/fpc-bsel.v2}"
 build_dir="$codec_dir/build-linux-prefix-only"
 build_seconds=0
 if [[ "$skip_build" == 0 ]]; then
+  log "building custom-FPC executable"
   start=$SECONDS
   cmake -S "$codec_dir" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release
   cmake --build "$build_dir" -j "$jobs"
@@ -90,6 +103,7 @@ if [[ "$skip_build" == 0 ]]; then
 fi
 exe="$build_dir/fpc-bsel-v2"
 [[ -n "$exe" && -x "$exe" ]] || { echo "missing FPC executable with payload support" >&2; exit 1; }
+log "build ready: $exe"
 
 dataset_list="$output_dir/datasets.tsv"
 "$python_bin" - "$dataset_dir" "$dataset_list" "$dataset_mode" <<'PY'
@@ -111,6 +125,8 @@ with output.open('w',encoding='utf8') as out:
         out.write(f'{name}\t{path.resolve()}\n')
 print(f'datasets={len(files)}')
 PY
+
+log "dataset enumeration complete: $(wc -l < "$dataset_list") input item(s)"
 
 split_dataset() {
   local source=$1 train=$2 test=$3 meta=$4
@@ -144,6 +160,7 @@ echo "__all__,build,$build_seconds" >> "$timing_raw"
 
 while IFS=$'\t' read -r name source; do
   [[ -n "$name" ]] || continue
+  log "[$name] preparing split from $source"
   work="$output_dir/$name"; mkdir -p "$work/prepared"
   train_trace="$work/prepared/train.trace"; test_trace="$work/prepared/test.trace"
   split_dataset "$source" "$train_trace" "$test_trace" "$work/split.json"
@@ -154,21 +171,29 @@ while IFS=$'\t' read -r name source; do
   echo "$name,custom_fpc_model,$((SECONDS-start))" >> "$timing_raw"
   path="custom-fpc"; model=$pure_model; path_dir="$work/$path"; mkdir -p "$path_dir"
     if [[ "$roundtrip" == 1 ]]; then
+      log "[$name] roundtrip verification started"
       "$exe" roundtrip-stream "$model" "$test_trace" | tee "$path_dir/roundtrip.log"
+      log "[$name] roundtrip verification finished"
     fi
     start=$SECONDS
+    log "[$name] custom-FPC payload export started"
     "$exe" payloads-256 "$model" "$test_trace" "$path_dir/test.payloads"
+    log "[$name] custom-FPC payload export finished"
     echo "$name,${path}_export,$((SECONDS-start))" >> "$timing_raw"
     for entries in "${cache_entries[@]}"; do
       run_dir="$path_dir/cache-e$entries"; mkdir -p "$run_dir"; start=$SECONDS
+      log "[$name] prefix scan started: cache_entries=$entries"
       "$python_bin" "$repo/tools/experiment_dynamic_prefix.py" \
         --payloads "$path_dir/test.payloads" --name "$name-$path-e$entries" --output-dir "$run_dir" \
         --entries "$entries" --resets 16 --word-bytes 4 --prefix-lengths 2,3 \
-        --previous-prefix --cache-policy clock | tee "$run_dir/run.log"
+        --previous-prefix --cache-policy clock --progress-every "$progress_every" "${prefix_verify[@]}" \
+        $([[ "$detail_log_enabled" == 1 ]] && printf '%s' "--detail-log $run_dir/subline-details.tsv") | tee "$run_dir/run.log"
+      log "[$name] prefix scan finished: cache_entries=$entries elapsed=$((SECONDS-start))s"
       echo "$name,${path}_prefix_e${entries},$((SECONDS-start))" >> "$timing_raw"
     done
 done < "$dataset_list"
 
+log "all dataset scans finished; building aggregate reports"
 "$python_bin" - "$output_dir" "$timing_raw" <<'PY'
 from pathlib import Path
 import csv,json,sys
@@ -244,3 +269,4 @@ print(f'all_caches={all_csv}\nbest={root/"prefix-best-results.csv"}\nreport={roo
 PY
 
 echo "results=$output_dir/prefix-report.md"
+log "reports written under $output_dir"

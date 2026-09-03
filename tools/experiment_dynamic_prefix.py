@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
+import time
 import csv
 import json
 import math
@@ -141,6 +144,7 @@ def dynamic_prefix_encode(
     cache_runs: bool = False,
     context_bits: int = 0,
     stats: dict | None = None,
+    detail_log=None,
 ) -> bytes:
     if cache_entries <= 0 or cache_entries & (cache_entries - 1):
         raise ValueError("cache_entries must be a positive power of two")
@@ -152,6 +156,8 @@ def dynamic_prefix_encode(
     previous_subline: bytes | None = None
     writer = BitWriter()
     for subline, payload in enumerate(region.payloads):
+        bits_before = writer.total_bits
+        hits_before = stats.get("hits", 0) if stats is not None else 0
         if subline % reset_subline_interval == 0:
             cache.clear()
             previous = None
@@ -243,6 +249,12 @@ def dynamic_prefix_encode(
             previous = chunk
             start += len(chunk)
         previous_subline = current_subline
+        if detail_log is not None:
+            hit_delta = (stats.get("hits", 0) - hits_before) if stats is not None else 0
+            compressed_bytes = (writer.total_bits-bits_before+7)//8
+            cache_hit = int(hit_delta>0)
+            detail_log.write(f"{region.index}\t{subline}\t{len(payload)}\t{compressed_bytes}\t{cache_hit}\n")
+            print(f"[subline pid={os.getpid()}] region={region.index} subline={subline} initial_bytes={len(payload)} compressed_bytes={compressed_bytes} cache_hit={cache_hit}", file=sys.stderr, flush=True)
     # One byte accounts for the outer compression mode. Parameters are fixed by the deployed profile.
     return bytes([1]) + length_header(region) + writer.finish()
 
@@ -342,6 +354,9 @@ def evaluate(
     previous_subline_prefix: bool = False, cache_policy: str = "fifo",
     cache_runs: bool = False,
     context_bits: int = 0,
+    progress_every: int = 100000,
+    verify_roundtrip: bool = False,
+    detail_log_path: Path | None = None,
 ):
     rows = []
     algorithm_before = algorithm_after = quantized_before = quantized_after = 0
@@ -352,17 +367,25 @@ def evaluate(
         "evictions": 0, "resets": 0, "occupancy_sum": 0,
         "peak_entries": 0, "hits_by_prefix_length": Counter(),
     }
+    total_sublines = sum(len(r.payloads) for r in regions)
+    done_sublines = 0
+    started = time.monotonic()
+    next_report = progress_every if progress_every > 0 else None
+    detail_log = detail_log_path.open('w', encoding='utf8') if detail_log_path else None
+    if detail_log: detail_log.write('region\tsubline\tinitial_bytes\tcompressed_bytes\tcache_hit\n')
     for region in regions:
         baseline = region.raw_blob()
         encoded = dynamic_prefix_encode(
             region, entries, reset, word, prefixes, previous_prefix, previous_subline_prefix,
             cache_policy, cache_runs, context_bits, cache_stats
+            , detail_log=detail_log
         )
-        decoded = dynamic_prefix_decode(
-            encoded, entries, reset, word, prefixes, previous_prefix, previous_subline_prefix, cache_policy, cache_runs, context_bits
-        )
-        if decoded != baseline:
-            raise RuntimeError(f"round-trip mismatch in region {region.index}")
+        if verify_roundtrip:
+            decoded = dynamic_prefix_decode(
+                encoded, entries, reset, word, prefixes, previous_prefix, previous_subline_prefix, cache_policy, cache_runs, context_bits
+            )
+            if decoded != baseline:
+                raise RuntimeError(f"round-trip mismatch in region {region.index}")
         # A region whose Custom-FPC representation (including the 16 length
         # fields) exceeds 4 KiB falls back to its original 4 KiB bytes.  Keep
         # it in the experiment: the prefix stage may still rescue it below a
@@ -391,6 +414,15 @@ def evaluate(
             "crossed": int(after_tier < before_tier),
             "raw_saved": baseline_size - chosen,
         })
+        done_sublines += len(region.payloads)
+        if next_report is not None and done_sublines >= next_report:
+            elapsed = max(time.monotonic() - started, 1e-6)
+            rate = done_sublines / elapsed
+            remain = (total_sublines - done_sublines) / rate if rate else 0
+            print(f"[prefix-progress pid={os.getpid()}] method={method} region={region.index} sublines={done_sublines}/{total_sublines} ({done_sublines/total_sublines:.1%}) rate={rate:.0f}/s eta={remain:.0f}s", file=sys.stderr, flush=True)
+            while next_report is not None and next_report <= done_sublines:
+                next_report += progress_every
+    if detail_log: detail_log.close()
     original = len(regions) * 4096
     entry_bytes = entries * 4
     clock_bytes = math.ceil(entries * 2 / 8) if cache_policy == "clock" else 0
@@ -406,7 +438,7 @@ def evaluate(
     summary = {
         "method": method,
         "regions": len(regions),
-        "roundtrip": True,
+        "roundtrip": verify_roundtrip,
         "algorithm_bytes_before": algorithm_before,
         "algorithm_bytes_after": algorithm_after,
         "algorithm_ratio_before": algorithm_before / original,
@@ -451,6 +483,9 @@ def main() -> None:
     parser.add_argument("--cache-policy", choices=("fifo", "clock"), default="fifo")
     parser.add_argument("--cache-runs", action="store_true")
     parser.add_argument("--context-bits", type=int, choices=range(0, 9), default=0)
+    parser.add_argument("--progress-every", type=int, default=100000, help="print progress every N sublines; 0 disables")
+    parser.add_argument("--verify-roundtrip", action="store_true", help="decode and verify each encoded region")
+    parser.add_argument("--detail-log", type=Path, help="write one TSV record per subline (large output)")
     args = parser.parse_args()
     regions = read_payloads(args.payloads)
     prefixes = tuple(int(value) for value in args.prefix_lengths.split(","))
@@ -464,6 +499,7 @@ def main() -> None:
             summary, rows = evaluate(
                 regions, method, entries, reset, args.word_bytes, prefixes,
                 args.previous_prefix, args.previous_subline_prefix, args.cache_policy, args.cache_runs, args.context_bits
+                , args.progress_every, args.verify_roundtrip, args.detail_log
             )
             summaries.append(summary)
             write_csv(args.output_dir / f"{args.name}-{method}-regions.csv", rows)

@@ -850,10 +850,12 @@ class BitWriter:
         self.out = bytearray()
         self.acc = 0
         self.bits = 0
+        self.total_bits = 0
 
     def write(self, value: int, width: int) -> None:
         self.acc |= value << self.bits
         self.bits += width
+        self.total_bits += width
         while self.bits >= 8:
             self.out.append(self.acc & 0xFF)
             self.acc >>= 8
