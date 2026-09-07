@@ -9,7 +9,10 @@ add_library(fpc_bsel_lib
     src/bsel.cpp
     src/fpc.cpp
     src/codec.cpp
-    src/model.cpp)
+    src/model.cpp
+    src/prefix_payload.cpp
+    src/pair_reorder.cpp
+    src/tier_reorder.cpp)
 target_include_directories(fpc_bsel_lib PUBLIC include)
 if(MSVC)
     target_compile_options(fpc_bsel_lib PRIVATE /W4)

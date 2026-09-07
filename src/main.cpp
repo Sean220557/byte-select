@@ -1569,14 +1569,20 @@ void print_mcc_layout_summary(const std::string& label, const bsel::MccLayout& l
 
 void command_mcc_sizes(int argc, char** argv) {
     if (argc < 4) {
-        throw std::runtime_error("usage: bsel mcc-sizes SIZE_LIST BLOCK_SIZE [--base N] [--alignment N] [--metadata-granularity N] [--guard-bytes N] [--region-lookback N]");
+        throw std::runtime_error("usage: bsel mcc-sizes SIZE_LIST BLOCK_SIZE [--exact-sizes] [--base N] [--alignment N] [--metadata-granularity N] [--guard-bytes N] [--region-lookback N]");
     }
     const auto block_size = parse_size(argv[3], "block size");
-    const auto sizes = quantize_mcc_subline_sizes(read_size_list(argv[2]), block_size);
+    auto sizes = read_size_list(argv[2]);
+    bool exact_sizes = false;
+    bool ordered_only = false;
     bsel::MccConfig config;
     for (int i = 4; i < argc; ++i) {
         const std::string option = argv[i];
-        if (option == "--base" && i + 1 < argc) {
+        if (option == "--ordered-only") {
+            ordered_only = true;
+        } else if (option == "--exact-sizes") {
+            exact_sizes = true;
+        } else if (option == "--base" && i + 1 < argc) {
             config.base_address = parse_size(argv[++i], "base address");
         } else if (option == "--alignment" && i + 1 < argc) {
             config.alignment = parse_size(argv[++i], "alignment");
@@ -1590,6 +1596,7 @@ void command_mcc_sizes(int argc, char** argv) {
             throw std::runtime_error("unknown or incomplete option: " + option);
         }
     }
+    if (!exact_sizes) sizes = quantize_mcc_subline_sizes(std::move(sizes), block_size);
     auto before_config = config;
     before_config.fill_padding = false;
     before_config.placement_mode = bsel::MccPlacementMode::AlignedRecords;
@@ -1603,6 +1610,12 @@ void command_mcc_sizes(int argc, char** argv) {
     v4_config.placement_mode = bsel::MccPlacementMode::TwoEndedTailV4;
     auto v5_config = config;
     v5_config.placement_mode = bsel::MccPlacementMode::SpacedPaddingV5;
+    if (ordered_only) {
+        print_mcc_layout_summary(
+            "mcc_sizes_ordered",
+            bsel::place_stored_blocks_in_memory(sizes, block_size, v1_config));
+        return;
+    }
     print_mcc_layout_summary(
         "mcc_sizes_before",
         bsel::place_stored_blocks_in_memory(sizes, block_size, before_config));

@@ -1,5 +1,8 @@
 #include "fpc_bsel/codec.hpp"
 #include "fpc_bsel/fpc.hpp"
+#include "fpc_bsel/prefix_payload.hpp"
+#include "fpc_bsel/pair_reorder.hpp"
+#include "fpc_bsel/tier_reorder.hpp"
 
 #include <iostream>
 #include <random>
@@ -108,6 +111,65 @@ int main() try {
     rejected = false;
     try { (void)fpc_bsel::decode_block({2, 4}, model); } catch (const std::exception&) { rejected = true; }
     check(rejected, "invalid flags rejection");
+
+    // Greedy takes donor 0 for bad region 0 and leaves bad region 1 unmatched.
+    // The augmenting-path matcher reroutes bad 0 to donor 1, proving that the
+    // reported solution is maximum-cardinality for the swap graph.
+    constexpr std::uint32_t target_capacity = 3072U * 8U - 33U * 8U;
+    auto reorder_region = [](std::uint16_t first, std::uint32_t second) {
+        fpc_bsel::TierReorderRegion region{};
+        region.payload_bits[0] = first;
+        region.payload_bits[1] = static_cast<std::uint16_t>(second);
+        region.payload_bits_total = static_cast<std::uint32_t>(first) + second;
+        return region;
+    };
+    const std::vector<fpc_bsel::TierReorderRegion> reorder_regions{
+        reorder_region(1000, target_capacity - 900),  // bad 0: excess 100
+        reorder_region(1100, target_capacity - 900),  // bad 1: excess 200
+        reorder_region(900, target_capacity - 1100),  // donor 0: slack 200
+        reorder_region(900, target_capacity - 1000),  // donor 1: slack 100
+    };
+    const auto greedy_reorder = fpc_bsel::optimize_tier_reorder(
+        reorder_regions, 3072, fpc_bsel::TierReorderStrategy::LocalGreedy);
+    const auto optimal_reorder = fpc_bsel::optimize_tier_reorder(
+        reorder_regions, 3072, fpc_bsel::TierReorderStrategy::MaximumMatching);
+    check(greedy_reorder.swaps.size() == 1, "tier reorder greedy baseline");
+    check(optimal_reorder.swaps.size() == 2, "tier reorder maximum matching");
+    check(optimal_reorder.compatible_edges == 3, "tier reorder exact swap graph");
+
+    fpc_bsel::Bytes prefix_input;
+    for (int block_index = 0; block_index < 4; ++block_index)
+        prefix_input.insert(prefix_input.end(), patterns.begin(), patterns.end());
+    const auto independent_prefix = fpc_bsel::prefix_encode_payload(prefix_input, model);
+    check(fpc_bsel::prefix_decode_payload(independent_prefix, model) == prefix_input,
+          "independent prefix payload round trip");
+    fpc_bsel::Bytes reorder_input;
+    for (int region = 0; region < 16; ++region)
+        reorder_input.insert(reorder_input.end(), prefix_input.begin(), prefix_input.end());
+    fpc_bsel::TierReorderRegion adjacent{};
+    adjacent.payload_bits[0] = 40; adjacent.payload_bits[1] = 30;
+    adjacent.payload_bits[2] = 30; adjacent.payload_bits[3] = 10;
+    const auto adjacent_plan = fpc_bsel::optimize_adjacent_pairs(
+        adjacent, fpc_bsel::TierReorderStrategy::MaximumMatching);
+    check(adjacent_plan.target_len == 6 && adjacent_plan.bad_pairs_before == 1,
+          "adjacent pair target selection");
+    check(adjacent_plan.bad_pairs_after == 0 && adjacent_plan.swaps.size() == 1,
+          "adjacent pair bad elimination");
+    fpc_bsel::TierReorderRegion reject_region{};
+    for (std::size_t pair = 0; pair < 4; ++pair) {
+        reject_region.payload_bits[pair * 2] = 4;
+        reject_region.payload_bits[pair * 2 + 1] = 4;
+    }
+    const auto rejected_pair_plan = fpc_bsel::optimize_adjacent_pairs(
+        reject_region, fpc_bsel::TierReorderStrategy::MaximumMatching);
+    check(rejected_pair_plan.target_len == 2 && !rejected_pair_plan.early_reject &&
+          rejected_pair_plan.bad_pairs_before == 4,
+          "bad pair full processing");
+    fpc_bsel::TierReorderRegion high_region{};
+    high_region.payload_bits[0] = 200; high_region.payload_bits[1] = 100;
+    const auto high_plan = fpc_bsel::optimize_adjacent_pairs(
+        high_region, fpc_bsel::TierReorderStrategy::MaximumMatching);
+    check(high_plan.target_len == 8, "dynamic max length target");
 
     std::cout << "all fpc-bsel tests passed\n";
     return 0;
