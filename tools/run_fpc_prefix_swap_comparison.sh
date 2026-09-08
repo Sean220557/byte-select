@@ -22,8 +22,22 @@ for file in "${files[@]}"; do
  "$bsel_build/bsel" fpc-top256-train-range "$file" "$model" 256 0 "$train" | tee "$dir/train.log"
  work=$(mktemp -d "$dir/chunks.XXXXXX"); offset=$test_offset; remaining=$test_bytes; index=0; chunk_bytes=$((chunk_mib*1024*1024)); chunk_bytes=$((chunk_bytes-chunk_bytes%4096))
  while ((remaining>0)); do count=$chunk_bytes; ((count>remaining)) && count=$remaining; count=$((count-count%4096)); ((count>0)) || break; chunk="$work/chunk.bin"; chunk_top="$work/top.sizes"; chunk_plain="$work/plain.sizes"; dd if="$file" of="$chunk" iflag=skip_bytes,count_bytes skip="$offset" count="$count" status=none; "$bsel_build/bsel" fpc-top256-sizes "$model" "$chunk" "$chunk_top" --plain-output "$chunk_plain" >/dev/null; cat "$chunk_plain" >> "$plain"; cat "$chunk_top" >> "$top"; offset=$((offset+count)); remaining=$((remaining-count)); index=$((index+1)); elapsed=$((($(date +%s%N)-started_ns)/1000000000)); rate=$(((offset-test_offset)/1048576/(elapsed+1))); log "[$name] chunks=$index processed=$((test_bytes-remaining))/$test_bytes rate_mib_s=$rate"; done
- rm -rf -- "$work"; model_bytes=$(stat -c %s -- "$model"); exact_args=(); [[ "$exact_matrix" == 1 ]] && exact_args+=(--exact-matrix); result=$("$fpc_build/top256-pair-eval" "$plain" "$top" "$test_bytes" "$model_bytes" "${exact_args[@]}"); printf '%s\n' "$result" | tee "$dir/summary.txt"; elapsed_ms=$((($(date +%s%N)-started_ns)/1000000))
+ rm -rf -- "$work"; model_bytes=$(stat -c %s -- "$model"); exact_args=(); [[ "$exact_matrix" == 1 ]] && exact_args+=(--exact-matrix); result=$("$fpc_build/top256-pair-eval" "$plain" "$top" "$test_bytes" "$model_bytes" "${exact_args[@]}"); printf '%s\n' "$result" > "$dir/summary.txt"; elapsed_ms=$((($(date +%s%N)-started_ns)/1000000))
  awk -v dataset="$name" -v elapsed_ms="$elapsed_ms" 'function v(k,i,a){for(i=1;i<=NF;++i){split($i,a,"=");if(a[1]==k)return a[2]+0}} {before=v("top256_independent_full_fraction");after=v("top256_swap_full_fraction");printf "%s,%.0f,%.0f,%.9f,%.9f,%.0f,%.9f,%.9f,%.0f,%.9f,%.9f,%.0f,%.6f,%.0f,%.0f,%.3f\n",dataset,v("original_bytes"),v("fpc_independent_full_bytes"),v("fpc_independent_full_fraction"),v("fpc_independent_full_x"),v("top256_independent_full_bytes"),before,v("top256_independent_full_x"),v("top256_swap_full_bytes"),after,v("top256_swap_full_x"),v("top256_swap_saved_bytes"),100*(before-after),v("greedy_independent_swaps"),v("greedy_independent_regions"),elapsed_ms/1000}' <<< "$result" >> "$summary"
  awk -v dataset="$name" 'function v(k,i,a){for(i=1;i<=NF;++i){split($i,a,"=");if(a[1]==k)return a[2]+0}} {printf "%s,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.0f,%.0f,%.0f\n",dataset,v("fpc_shared_full_fraction"),v("fpc_independent_full_fraction"),v("fpc_independent_optimal_full_fraction"),v("top256_shared_full_fraction"),v("top256_local_shared_full_fraction"),v("top256_global_shared_full_fraction"),v("top256_independent_full_fraction"),v("top256_local_independent_full_fraction"),v("top256_global_independent_full_fraction"),v("top256_greedy_independent_full_fraction"),v("top256_optimal_independent_full_fraction"),v("common_length_metadata_bytes"),v("top256_model_bytes"),v("reorder_bitmap_bytes")}' <<< "$result" >> "$matrix"
 done
-log "completed summary=$summary diagnostic_matrix=$matrix"; column -s, -t "$summary" 2>/dev/null || cat "$summary"
+log "completed summary=$summary diagnostic_matrix=$matrix"
+awk -F, '
+  NR == 1 { next }
+  {
+    printf "\n=== %s ===\n", $1
+    printf "Original:                 %12.0f bytes  100.0000%%\n", $2
+    printf "FPC:                      %12.0f bytes  %8.4f%%  saved=%7.4f%%  %.4fx\n", $3,100*$4,100*(1-$4),$5
+    printf "FPC + Top256:             %12.0f bytes  %8.4f%%  saved=%7.4f%%  %.4fx\n", $6,100*$7,100*(1-$7),$8
+    printf "FPC + Top256 + Swap:      %12.0f bytes  %8.4f%%  saved=%7.4f%%  %.4fx\n", $9,100*$10,100*(1-$10),$11
+    printf "Swap incremental gain:   %12.0f bytes  %8.4f percentage-points\n", $12,$13
+    printf "Swap activity:            %12.0f swaps  %8.0f reordered regions\n", $14,$15
+    printf "Dataset elapsed:          %12.3f seconds\n", $16
+  }
+' "$summary"
+printf '\nCSV summary: %s\nDiagnostic matrix: %s\n' "$summary" "$matrix"
