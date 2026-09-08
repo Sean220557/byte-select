@@ -28,5 +28,17 @@ bool round(std::array<std::uint16_t,16>& v,std::uint16_t target,TierReorderStrat
  bool changed=false;for(std::uint8_t bi=0;bi<nb;++bi)if(partner[bi]>=0){const auto gp=good[partner[bi]];std::uint8_t bs=0;for(std::uint8_t e=0;e<ec[bi];++e)if(eg[bi][e]==partner[bi]){bs=eb[bi][e];break;}const auto gs=rightmost(value_mask(v,bs,gp,target));std::swap(v[bs],v[gs]);out.push_back({bad[bi],gp,bs,gs});changed=true;}return changed;
 }
 } PairReorderResult optimize_adjacent_pairs(const TierReorderRegion& region,TierReorderStrategy strategy){
- auto v=region.payload_bits;PairReorderResult r;std::uint16_t max_bytes=0;for(std::uint8_t p=0;p<8;++p)max_bytes=std::max(max_bytes,static_cast<std::uint16_t>(v[p*2U]+v[p*2U+1U]));r.max_len_before=exponent(max_bytes);auto target=next_target(r.max_len_before);r.target_len=target;const auto capacity=target?static_cast<std::uint32_t>(1U<<target):0U;for(std::uint8_t p=0;p<8;++p)r.bad_pairs_before+=static_cast<std::uint8_t>(target&&(v[p*2U]+v[p*2U+1U]>capacity));while(target&&r.rounds<8){if(!round(v,target,strategy,r.swaps))break;++r.rounds;}r.reordered=!r.swaps.empty();std::uint16_t final_max=0;for(std::uint8_t p=0;p<8;++p){const auto n=static_cast<std::uint16_t>(v[p*2U]+v[p*2U+1U]);final_max=std::max(final_max,n);if(target&&n>capacity)++r.bad_pairs_after;}r.max_len_after=exponent(final_max);return r;}
+ auto v=region.payload_bits;PairReorderResult r;
+ auto maximum_pair_bytes=[&](){std::uint16_t value=0;for(std::uint8_t p=0;p<8;++p)value=std::max(value,static_cast<std::uint16_t>(v[p*2U]+v[p*2U+1U]));return value;};
+ r.max_len_before=exponent(maximum_pair_bytes());r.target_len=next_target(r.max_len_before);const auto initial_capacity=r.target_len?static_cast<std::uint32_t>(1U<<r.target_len):0U;
+ for(std::uint8_t p=0;p<8;++p)r.bad_pairs_before+=static_cast<std::uint8_t>(r.target_len&&(v[p*2U]+v[p*2U+1U]>initial_capacity));
+ auto current_exp=r.max_len_before;
+ while(const auto target=next_target(current_exp)){
+  const auto capacity=static_cast<std::uint32_t>(1U<<target);bool stage_progress=false;
+  for(std::uint8_t stage_round=0;stage_round<8;++stage_round){if(!round(v,target,strategy,r.swaps))break;++r.rounds;stage_progress=true;}
+  bool stage_complete=true;for(std::uint8_t p=0;p<8;++p)stage_complete&=(v[p*2U]+v[p*2U+1U]<=capacity);
+  if(!stage_complete||!stage_progress)break;
+  current_exp=exponent(maximum_pair_bytes());
+ }
+ r.reordered=!r.swaps.empty();const auto final_max=maximum_pair_bytes();r.max_len_after=exponent(final_max);for(std::uint8_t p=0;p<8;++p)r.bad_pairs_after+=static_cast<std::uint8_t>(r.target_len&&(v[p*2U]+v[p*2U+1U]>initial_capacity));return r;}
 } // namespace fpc_bsel

@@ -1445,13 +1445,15 @@ void command_fpc_top256_train_range(int argc, char** argv) {
 }
 
 void command_fpc_top256_sizes(int argc, char** argv) {
-    if (argc < 5 || argc > 7)
-        throw std::runtime_error("usage: bsel fpc-top256-sizes MODEL INPUT OUTPUT [--hybrid] [--spatial-xor]");
+    if (argc < 5 || argc > 9)
+        throw std::runtime_error("usage: bsel fpc-top256-sizes MODEL INPUT OUTPUT [--plain-output FILE] [--hybrid] [--spatial-xor]");
     bool hybrid = false, spatial_xor = false;
+    std::string plain_output_path;
     for (int i = 5; i < argc; ++i) {
         const std::string option = argv[i];
         if (option == "--hybrid") hybrid = true;
         else if (option == "--spatial-xor") spatial_xor = true;
+        else if (option == "--plain-output" && i + 1 < argc) plain_output_path = argv[++i];
         else throw std::runtime_error("unknown FPC Top-256 size option: " + option);
     }
     const auto loaded = load_fpc_top256_model(argv[2]);
@@ -1463,11 +1465,14 @@ void command_fpc_top256_sizes(int argc, char** argv) {
     std::uint64_t previous_delta_blocks = 0;
     const auto blocks_per_region = std::max<std::size_t>(1, 4096 / loaded.first);
     std::vector<std::size_t> sizes;
+    std::vector<std::size_t> plain_sizes;
     std::vector<std::uint32_t> region_words;
     sizes.reserve(blocks.size());
+    if (!plain_output_path.empty()) plain_sizes.reserve(blocks.size());
     for (std::size_t i = 0; i < blocks.size(); ++i) {
         if (i % blocks_per_region == 0) region_words.clear();
         const auto& block = blocks[i];
+        if (!plain_output_path.empty()) plain_sizes.push_back(bsel::fpc_encoded_size(block));
         auto size = bsel::fpc_region_word_encoded_size(block, loaded.second, region_words);
         if (hybrid) size = std::min(size, bsel::bdi_encoded_size(block));
         if (spatial_xor && i % blocks_per_region != 0) {
@@ -1521,6 +1526,11 @@ void command_fpc_top256_sizes(int argc, char** argv) {
     for (const auto size : sizes) {
         output << size << '\n';
         stored += size;
+    }
+    if (!plain_output_path.empty()) {
+        std::ofstream plain_output(plain_output_path);
+        if (!plain_output) throw std::runtime_error("cannot create plain FPC size list");
+        for (const auto size : plain_sizes) plain_output << size << '\n';
     }
     std::cout << "blocks=" << blocks.size() << " stored_bytes=" << stored
               << " previous_xor_blocks=" << previous_xor_blocks

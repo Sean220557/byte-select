@@ -25,6 +25,8 @@ target_link_libraries(fpc-bsel-v2 PRIVATE fpc_bsel_lib)
 
 add_executable(prefix-eval-cpp src/prefix_eval.cpp)
 target_link_libraries(prefix-eval-cpp PRIVATE fpc_bsel_lib)
+add_executable(top256-pair-eval src/top256_pair_eval.cpp)
+target_link_libraries(top256-pair-eval PRIVATE fpc_bsel_lib)
 if(MSVC)
     target_compile_options(prefix-eval-cpp PRIVATE /W4 /O2)
 else()
