@@ -39,12 +39,22 @@ c++ -O3 -std=c++17 tools/search_linear_mphf.cpp -o /tmp/search_linear_mphf
 
 ```sh
 /tmp/search_linear_mphf codebook.txt \
-  --seconds 60 --max-cap 5 --max-candidates 250000
+  --seconds 300 --max-cap 5 --max-candidates 1500000
 ```
+
+这是 C++ 版本的默认值（Python 版本仍为 60 秒、250000 个候选）。
+增加时间只允许更久地搜索，并不扩大单行的 5-tap 上限；如需搜索更重的行，
+还须显式提高 `--max-cap`。1500000 是候选签名数量限制，不是严格内存上限，
+处理新码本时应同时检查 JSON 的 `status`、`generated_cap` 和 `proved_cap`。
 
 stdout 输出 JSON，阶段进度输出 stderr。C++ 版本当前实现候选扫描最后一行，不包含
 Python 版本的 `--last-row mitm` 实验分支；它输出矩阵 mask、行 tap、总 tap、独立 XOR、
-32个 ID、候选层和搜索状态。
+32个 ID、候选层、实际耗时、预算和搜索状态。
+
+C++ 版在每个 cap 都完整搜索后，下一层只需检查至少含一行新增权重的矩阵；
+由于候选按权重排序，这一行必在最后。这样不会漏掉更优解，并可收紧成本下界。
+最后两行直接配对检查，避免构造中间候选池和重复划分；均分测试只在成功时
+创建下一层分组。这些优化不改变独立行 tap 目标或证明范围。
 
 ## 实际实现的算法
 
