@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Budgeted sparse GF(2) perfect-map search for 32 distinct uint64 keys.
+"""针对 32 个互不相同的 uint64 关键字、带预算约束的稀疏 GF(2) 完美映射搜索。
 
-Only the codebook path is required. stdout is a single JSON result; progress
-goes to stderr. Optimality concerns independent output XOR trees, not circuits.
+这里只需代码本（codebook）这条路径即可。stdout 输出单个 JSON 结果；进度信息
+写入 stderr。所谓「最优」仅涉及相互独立的输出 XOR 树，与电路级优化无关。
 """
 import argparse
 import hashlib
@@ -16,11 +16,30 @@ import time
 
 
 def check_time(deadline):
+    """功能：协作式时间限制检查，一旦超过 `deadline` 就抛出 TimeoutError。
+
+    输入：
+      - deadline：单调时钟（monotonic clock，time.monotonic 的返回值）代表的截止时刻。
+    输出/返回：无返回值；若当前时间已超过截止时刻则抛出 TimeoutError 异常。
+    """
     if time.monotonic() >= deadline:
         raise TimeoutError
 
 
 def describe(keys, masks):
+    """功能：在代码本上评估一组 XOR 行 `masks`，并给出其描述信息。
+
+    将每个 mask 转换为 32 位 signature（第 i 位 = 在 32 个关键字上
+    key[i] & mask 的奇偶性），校验这些 signature 是否构成到 0..nkeys-1 的双射，
+    并报告 tap 数量、每行的表达式、贪心共享 XOR 成本估计以及生成的 32 个 ID。
+
+    输入：
+      keys  -- n 个互不相同的整数（即代码本 patterns）。
+      masks -- 若干 int 输入 mask 组成的列表，每个 mask 对应一行输出。
+    输出/返回：返回一个 dict，包含 rows/bits/expressions/row_taps/taps/
+      independent_xors/ids 以及贪心共享门（shared-gate）估计值；若并非双射则抛出
+      ValueError 异常。
+    """
     bits = [[j for j in range(64) if m >> j & 1] for m in masks]
     ids = [sum(((x&m).bit_count() % 2) << j for j,m in enumerate(masks))
            for x in keys]
@@ -52,10 +71,17 @@ def describe(keys, masks):
 
 
 def last_row(differences, width, cap, deadline):
-    """Minimum-weight Dm=1 via syndrome meet-in-the-middle, no matrix inverse.
+    """功能：通过 syndrome 的 meet-in-the-middle 方式求最小权重的 Dm=1，无需矩阵求逆。
 
-    Each half has at most ceil(cap/2) taps. Equal syndromes retain the cheapest
-    representation; overlapping halves cancel, which can only reduce weight.
+    每一半最多有 ceil(cap/2) 个 tap。相同的 syndrome 只保留代价最小的表示；
+    两半之间重叠的部分会相互抵消，这只会让权重变得更小。
+
+    输入：
+      differences -- 输入关键字之间的差异值列表。
+      width       -- 列的宽度（即输入列的数目）。
+      cap         -- 允许的最大 tap 权重。
+      deadline    -- 单调时钟截止时刻；超时会抛出 TimeoutError。
+    输出/返回：返回权重最小的行 mask（满足 <= cap），若找不到则返回 None。
     """
     columns = [sum(((d >> j)&1) << i for i,d in enumerate(differences))
                for j in range(width)]
@@ -84,7 +110,20 @@ def last_row(differences, width, cap, deadline):
 
 
 def optimize(keys, candidates, deadline, incumbent=None, last='scan', cap=4):
-    """One branch-and-bound traversal; complete is scoped to this pool only."""
+    """功能：在固定的候选池（candidate pool）上做分支定界（branch-and-bound）DFS。
+
+    在平衡分组切分约束下探索一棵 DFS 树，以找到低 tap 的 5 行（或更少）映射。
+
+    输入：
+      keys       -- n 个代码本 patterns。
+      candidates -- (weight, signature, mask) 元组组成的列表，已按序排好。
+      deadline   -- 单调时钟截止时刻；超时会抛出 TimeoutError。
+      incumbent  -- 可选的既有最佳结果，用于初始化上界 U。
+      last       -- 最后一行采用的策略，取 'scan' 或 'mitm'。
+      cap        -- 池中已经生成的每行最大 tap 权重。
+    输出/返回：返回 dict，包含 best、complete（候选池是否已被完整搜索）、nodes，
+      以及搜索过程中发现的 tap 计数改进序列 improvements。
+    """
     k = (len(keys)-1).bit_length()
     pool = sorted(c for c in candidates if c[1].bit_count()*2 == len(keys))
     best = incumbent
@@ -140,8 +179,8 @@ def optimize(keys, candidates, deadline, incumbent=None, last='scan', cap=4):
                     if index % 256 == 0:
                         check_time(deadline)
                     d = pool[index]
-                    # d may be the LAST selected row. Do not charge its weight
-                    # for all remaining rows (historical unsafe-pruning bug).
+                    # d 可能是「最后」被选中的那一行。不要将其权重计入所有剩余行的成本
+                    # （这是一处历史遗留的有风险剪枝 bug）。
                     if cost+w+d[0]+w*(remaining-2) >= upper:
                         break
                     if all((g&d[1]).bit_count()*2 == g.bit_count() for g in halves):
@@ -158,6 +197,20 @@ def optimize(keys, candidates, deadline, incumbent=None, last='scan', cap=4):
 
 
 def run(keys, seconds=60, max_candidates=250000, last='scan', progress=None):
+    """功能：顶层自动搜索——逐步扩展 cap 层级、搜索并报告结果。
+
+    按权重（1..）增量生成候选 mask，保留 balanced signature，并在每个已完成
+    的候选池上运行分支定界 DFS，从而不断压低 incumbent。
+
+    输入：
+      keys           -- 32 个互不相同的 64 位关键字。
+      seconds        -- 以秒计的墙钟（wall-clock）时间预算。
+      max_candidates -- 存储候选的上限。
+      last           -- 最后一行采用的方法。
+      progress       -- 可选进度回调，接收每个阶段的 stage dict。
+
+    输出/返回：返回结果 dict，包含 status、best、stages 列表以及完成性证明相关信息。
+    """
     if len(keys) != 32 or len(set(keys)) != 32 or any(
             not isinstance(x,int) or x < 0 or x >= 1 << 64 for x in keys):
         raise ValueError('expected exactly 32 distinct unsigned 64-bit keys')
@@ -193,11 +246,11 @@ def run(keys, seconds=60, max_candidates=250000, last='scan', progress=None):
                     candidates[s] = (cap,s,mask)
             generated_cap = cap
             generation_seconds = time.monotonic()-pre
-            # Cheap rows are generated together, never run a full cap=1/2 DFS.
+            # 廉价的行会一起生成，因此从不对完整的 cap=1/2 层级运行 DFS。
             if cap < 3:
                 continue
             stage_start = time.monotonic()
-            # Brief sparse probe, then geometric slices. Leave room for expansion.
+            # 先做一次简短稀疏探测，再按几何级数切片。为后续扩展预留时间。
             slice_seconds = min(0.5 if cap == 3 else 12*2**(cap-4),
                                 max(0, deadline-stage_start))
             r = optimize(keys, list(candidates.values()), stage_start+slice_seconds,
@@ -215,8 +268,8 @@ def run(keys, seconds=60, max_candidates=250000, last='scan', progress=None):
             if progress:
                 progress(stage)
             if best:
-                # Every balanced row costs at least wmin, proven by enumeration
-                # of all smaller weights. Any improvement has max row <= bound.
+                # 每一行 balanced row 的代价至少为 wmin，这一点已通过对所有更小权重做穷举验证。
+                # 任何改进方案的最大行（max row）权重都不会超过该 bound。
                 wmin = min(c[0] for c in candidates.values())
                 needed_cap = best['taps']-1-4*wmin
                 if best['taps'] == 5 or (r['complete'] and cap >= needed_cap):
@@ -234,6 +287,13 @@ def run(keys, seconds=60, max_candidates=250000, last='scan', progress=None):
 
 
 def main():
+    """功能：命令行入口——读取代码本文件并把 JSON 结果打印到 stdout。
+
+    输入：来自 sys.argv 参数（--seconds / --max-candidates / --last-row），以及
+      代码本文件内容（每行形如 "| 16 位十六进制数字 |" 的数据行）。
+    输出/返回：在 stdout 上打印 JSON 报告（各阶段的进度写入 stderr）。任务有效时（哪怕
+      超时）以状态码 0 退出；任何输入错误均以状态码 2 退出。
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('codebook', type=Path)
     parser.add_argument('--seconds', type=float, default=60)

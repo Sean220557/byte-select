@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the hand-written 5x64 GF(2) maps for both 32-entry codebooks."""
+"""验证两个 32 项代码本的、手工编写的 5x64 GF(2) 映射（maps）。"""
 from pathlib import Path
 
 ROWS = {
@@ -10,12 +10,18 @@ ROWS = {
 }
 
 
+# 功能：从代码本的文本文件中读取其 32 个 64 位 patterns。
+# 输入：
+#   - name：代码本名称（例如 "codebook1"）。
+# 输出/返回：按文件中的顺序返回 32 个 int 组成的列表。
 def read_keys(name: str) -> list[int]:
     path = Path(__file__).parents[1] / "results" / "mphf-32" / f"{name}.txt"
     return [int(line.split("|")[1].strip(), 16)
             for line in path.read_text().splitlines() if "|" in line]
 
 
+# 主验证流程：对每个代码本，评估其所有手工编写的 5x64 GF(2) 映射，并断言
+# 生成的 32 个 ID 恰好构成 0..31 的一个排列。
 for name, rows in ROWS.items():
     keys = read_keys(name)
     ids = []
