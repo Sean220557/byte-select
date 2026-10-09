@@ -75,6 +75,45 @@ python3 tools/generate_prefix_codebook_upto1024.py \
 生成和 beam 搜索，但最终只到第 3 层，未找到 10 行映射。这不是不可行性证明。
 它说明直接把 32 项 DFS 扩展到 1024 项后，候选生成和搜索树都会成为主要瓶颈。
 
+## 加长预算与扩大候选范围
+
+随后在同一份固定输入上增加搜索预算。所有结果的完整 JSON 保存在对应码本目录
+中；`status` 仍然是启发式搜索状态，不代表数学上的不可行性证明。
+
+| 码本 | 输出位数 | seconds | max-cap | beam | candidate 上限 | 结果 | 实际情况 |
+|---|---:|---:|---:|---:|---:|---|---|
+| Custom-FPC-1000 | 10 | 300 | 4 | 256 | 1,000,000 | `not_found_within_beam` | 329,988 个候选，300,592,108 次状态检查，最深到第 4 层 |
+| Custom-FPC-1024 | 10 | 300 | 4 | 256 | 1,000,000 | `not_found_within_beam` | 13,969 个候选，8,820,319 次状态检查，最深到第 3 层 |
+| Custom-FPC-1024 | 10 | 300 | 6 | 512 | 2,000,000 | `candidate_limit` | 候选达到 2,000,000；在 cap=5 时最深到第 4 层 |
+| Custom-FPC-1024 | 11 | 120 | 4 | 256 | 1,000,000 | `time_limit` | 679,120 个候选；11-bit 输出仍未得到无碰撞映射 |
+
+对应结果文件为：
+
+```text
+custom-fpc-1000/search-cap4-300s.json
+custom-fpc-1024/search-cap4-300s.json
+custom-fpc-1024/search-cap6-300s.json
+custom-fpc-1024/search-extra1-cap4-120s.json
+```
+
+这轮实验有两个结论。第一，单纯把 `cap` 从 4 增加到 6 会使候选池迅速膨胀：
+1024 项输入在 cap=6 阶段触达 200 万候选上限，搜索还没有进入有效的深层组合。
+第二，增加 1 个输出位只把 offset 空间从 1024 扩大到 2048，并没有在当前候选
+策略下找到映射。因此目前的主要问题不是运行时间太短，而是 64 个输入列产生的
+行为组合空间太大，且 Custom-FPC 码本的差分秩为 64，不能走低秩仿射投影快捷路径。
+
+本轮搜索命令示例：
+
+```sh
+/tmp/search_linear_mphf_upto1024_v2 \
+  results/mphf-1024/custom-fpc-1000/codebook.txt \
+  --seconds 300 --max-cap 4 --beam-width 256 --max-candidates 1000000
+
+/tmp/search_linear_mphf_upto1024_v2 \
+  results/mphf-1024/custom-fpc-1024/codebook.txt \
+  --seconds 300 --max-cap 6 --beam-width 512 --max-candidates 2000000
+```
+
 ## 现阶段结论
 
 原型已经验证了三个接口性质：
