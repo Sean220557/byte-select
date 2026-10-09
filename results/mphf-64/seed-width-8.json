@@ -1,0 +1,10 @@
+{
+  "single_multiply_shift": {"success": false, "attempts": 0, "best_unique": 0, "elapsed_ms": 0.000, "m1": 0, "m2": 0, "shift": 0, "rotate": 0},
+  "two_multiply_xor": {"success": false, "attempts": 0, "best_unique": 0, "elapsed_ms": 0.000, "m1": 0, "m2": 0, "shift": 0, "rotate": 0},
+  "two_level_displacement": [
+    {"success": false, "attempts": 1000000, "elapsed_ms": 1333.528, "bucket_count": 16, "max_bucket": 0, "max_displacement": 0, "entry_bits": 7, "table_bits": 112, "parameter_bytes_bit_packed": 30, "parameter_bytes_byte_entries": 32, "seed1": 0, "seed2": 0, "displacements": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]},
+    {"success": false, "attempts": 1000000, "elapsed_ms": 1390.246, "bucket_count": 32, "max_bucket": 0, "max_displacement": 0, "entry_bits": 7, "table_bits": 224, "parameter_bytes_bit_packed": 44, "parameter_bytes_byte_entries": 48, "seed1": 0, "seed2": 0, "displacements": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]},
+    {"success": false, "attempts": 1000000, "elapsed_ms": 1437.778, "bucket_count": 64, "max_bucket": 0, "max_displacement": 0, "entry_bits": 7, "table_bits": 448, "parameter_bytes_bit_packed": 72, "parameter_bytes_byte_entries": 80, "seed1": 0, "seed2": 0, "displacements": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]},
+    {"success": false, "attempts": 1000000, "elapsed_ms": 1608.542, "bucket_count": 128, "max_bucket": 0, "max_displacement": 0, "entry_bits": 7, "table_bits": 896, "parameter_bytes_bit_packed": 128, "parameter_bytes_byte_entries": 144, "seed1": 0, "seed2": 0, "displacements": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]}
+  ]
+}
