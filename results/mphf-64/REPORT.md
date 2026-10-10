@@ -239,7 +239,44 @@ linear-search-8bit-60s.json
 6-bit 结果没有证明不存在 6-bit 线性映射；它只表示当前候选池和 beam 预算内未
 找到。7-bit 和 8-bit 结果则是经过程序对全部 64 个 key 逐项验证的可行映射。
 
-### 7.2 7-bit、9-tap 映射
+### 7.2 严格 6-bit 搜索优化后的结果
+
+针对严格 `0..63` 目标，搜索器增加了两项优化：64 项输入时把当前分组保存为一个
+64-bit pattern 集合，用 `AND + popcount` 检查候选；前五行把 64 项分成 32 对后，
+最后一行直接在输入列的 GF(2) 张成空间中求解，不再扫描整个第六行候选池。最后一行
+还会尝试与前五行做线性组合，并枚举有限的 signature kernel 表示，选出 taps 更少的
+等价实现。
+
+在 `--seconds 180 --max-cap 5 --beam-width 512 --max-candidates 1000000` 下，
+找到严格的 6-bit 映射：
+
+| 结果 | taps | 独立 XOR | 候选数 | 实际耗时 |
+|---|---:|---:|---:|---:|
+| `found_heuristic` | **29** | **23** | 821,297 | 134.7 s |
+
+64 个输出 ID 经逐项验证后恰好是 `0..63`。这不是全局最小 taps 证明；它是当前
+beam 宽度、候选权重上限和等价行化简下找到的最好结果。完整 JSON 保存在
+`linear-search-6bit-optimized-180s.json`。
+
+### 7.3 29-tap 矩阵
+
+搜索得到的 6 行为：
+
+```text
+o0 = X15
+o1 = X0 XOR X21
+o2 = X3 XOR X24 XOR X53
+o3 = X10 XOR X16 XOR X29
+o4 = X11 XOR X38 XOR X39 XOR X40
+o5 = X0 XOR X2 XOR X4 XOR X8 XOR X18 XOR X24 XOR X34 XOR X41
+   XOR X42 XOR X45 XOR X46 XOR X47 XOR X54 XOR X55 XOR X56 XOR X61
+offset = o0 + 2*o1 + 4*o2 + 8*o3 + 16*o4 + 32*o5
+```
+
+行 tap 数为 `1+2+3+3+4+16=29`，因此需要 23 次独立 XOR。最后一行较密，
+这是“前五行分组后由 GF(2) 方程求解”的结果；它不受 `cap=5` 的候选 tap 限制。
+
+### 7.4 7-bit、9-tap 映射
 
 搜索返回的 7 行为：
 
@@ -257,7 +294,7 @@ offset = o0 + 2*o1 + 4*o2 + 8*o3 + 16*o4 + 32*o5 + 64*o6
 总 tap 数为 `1+1+1+1+1+2+2=9`，独立 XOR 树数为 2。64 个输入得到 64 个
 不同的 7-bit offset，但这些 offset 不是连续的 `0..63`。
 
-### 7.3 8-bit、8-tap 直连映射
+### 7.5 8-bit、8-tap 直连映射
 
 更宽的 8-bit 输出空间允许搜索器在 cap=1 时直接找到 8 个输入 bit：
 
@@ -279,7 +316,7 @@ offset 中占用 64 个位置。这个结果说明该码本的 64 项可以由�
 但它不是直接的 6-bit MPHF：若下游必须得到连续 `0..63`，还需要一个 rank/remap
 层，或者接受 8-bit 稀疏 offset。
 
-### 7.4 对硬件的含义
+### 7.6 对硬件的含义
 
 对于允许稀疏 offset 的查找结构，8-bit 方案的运行时路径非常简单：读取 8 根输入
 bit，拼成 offset，再访问 256-entry 的稀疏表。若仍然只保存 64-entry 反向码本，
@@ -321,6 +358,10 @@ c++ -O3 -std=c++17 -Wall -Wextra \
   > results/mphf-64/linear-search-6bit-60s.json
 
 /tmp/search_linear_mphf_upto1024 results/mphf-64/codebook.txt \
+  --seconds 180 --max-cap 5 --beam-width 512 --max-candidates 1000000 \
+  > results/mphf-64/linear-search-6bit-optimized-180s.json
+
+/tmp/search_linear_mphf_upto1024 results/mphf-64/codebook.txt \
   --seconds 120 --extra-bits 1 --max-cap 5 --beam-width 256 \
   --max-candidates 1000000 \
   > results/mphf-64/linear-search-7bit-120s.json
@@ -331,6 +372,7 @@ c++ -O3 -std=c++17 -Wall -Wextra \
   > results/mphf-64/linear-search-8bit-60s.json
 
 python3 -m json.tool results/mphf-64/linear-search-6bit-60s.json >/dev/null
+python3 -m json.tool results/mphf-64/linear-search-6bit-optimized-180s.json >/dev/null
 python3 -m json.tool results/mphf-64/linear-search-7bit-120s.json >/dev/null
 python3 -m json.tool results/mphf-64/linear-search-8bit-60s.json >/dev/null
 ```

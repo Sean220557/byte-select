@@ -130,9 +130,27 @@ struct Candidate {
   Signature signature{};
 };
 
+struct Candidate64 {
+  Key mask = 0;
+  unsigned weight = 0;
+  Key signature = 0;
+};
+
 struct State {
   std::vector<std::uint16_t> ids;
   std::vector<unsigned> rows;  // candidate indices in increasing order
+  unsigned taps = 0;
+  std::uint64_t squared_occupancy = 0;
+};
+
+// 对不超过 64 个 pattern 的严格 MPHF 搜索，直接保存当前 prefix 分组的
+// pattern 集合。这样每次候选只需对每个分组做一次 AND 和 popcount，避免把
+// 每个 pattern 的 prefix ID 逐项重建。
+struct FastState64 {
+  std::array<std::uint64_t, 64> groups{};
+  std::array<unsigned, 6> rows{};
+  unsigned group_count = 1;
+  unsigned row_count = 0;
   unsigned taps = 0;
   std::uint64_t squared_occupancy = 0;
 };
@@ -158,7 +176,9 @@ class Searcher {
       for (unsigned i = 0; i < keys_.size(); ++i)
         if ((keys_[i] >> bit) & 1ULL) columns_[bit][i / 64] |= Key{1} << (i % 64);
     }
+    active_words_ = (static_cast<unsigned>(keys_.size()) + 63U) / 64U;
     make_column_coordinates();
+    make_signature_solver();
   }
 
   std::string run() {
@@ -182,13 +202,16 @@ class Searcher {
       Stage stage;
       stage.cap = cap;
       if (!generate_weight(cap, 0, cap, 0, 0)) {
-        stage.candidates = candidates_.size();
+        stage.candidates = candidate_count();
         stages_.push_back(stage);
         status_ = candidate_limit_ ? "candidate_limit" : "time_limit";
         break;
       }
-      stage.candidates = candidates_.size();
-      search_beam(stage);
+      stage.candidates = candidate_count();
+      if (keys_.size() <= 64 && output_bits_ <= 6)
+        search_fast64(stage);
+      else
+        search_beam(stage);
       stages_.push_back(stage);
       std::cerr << "cap=" << cap << " candidates=" << stage.candidates
                 << " checked=" << stage.checked << " deepest=" << stage.deepest
@@ -209,10 +232,15 @@ class Searcher {
   unsigned slots_ = 0;
   unsigned difference_rank_ = 0;
   unsigned signature_rank_ = 0;
+  unsigned active_words_ = 0;
   std::array<Signature, kInputBits> columns_{};
   std::array<Key, kInputBits> column_coordinates_{};
   std::array<Key, kMaxKeys> basis_coordinates_{};
+  std::array<Key, kInputBits> signature_basis_{};
+  std::array<Key, kInputBits> signature_basis_masks_{};
+  std::vector<Key> signature_null_masks_;
   std::vector<Candidate> candidates_;
+  std::vector<Candidate64> candidates64_;
   std::unordered_set<Key> seen_behaviors_;
   Signature scratch_{};
   std::vector<Stage> stages_;
@@ -226,12 +254,18 @@ class Searcher {
   bool timed_out_ = false;
   bool candidate_limit_ = false;
 
+  bool fast_mode() const { return keys_.size() <= 64 && output_bits_ <= 6; }
+
+  std::size_t candidate_count() const {
+    return fast_mode() ? candidates64_.size() : candidates_.size();
+  }
+
   static bool bit_at(const Signature& s, unsigned i) {
     return (s[i / 64] >> (i % 64)) & 1ULL;
   }
 
-  static void xor_signature(Signature& a, const Signature& b) {
-    for (unsigned w = 0; w < kWords; ++w) a[w] ^= b[w];
+  void xor_signature(Signature& a, const Signature& b) const {
+    for (unsigned w = 0; w < active_words_; ++w) a[w] ^= b[w];
   }
 
   void make_column_coordinates() {
@@ -256,6 +290,38 @@ class Searcher {
       }
       column_coordinates_[j] = coordinate;
     }
+  }
+
+  void make_signature_solver() {
+    if (!fast_mode()) return;
+    for (unsigned bit = 0; bit < kInputBits; ++bit) {
+      Key residue = columns_[bit][0];
+      Key mask = Key{1} << bit;
+      for (int pivot = 63; pivot >= 0 && residue; --pivot) {
+        if (!(residue & (Key{1} << pivot))) continue;
+        if (signature_basis_[pivot]) {
+          residue ^= signature_basis_[pivot];
+          mask ^= signature_basis_masks_[pivot];
+        } else {
+          signature_basis_[pivot] = residue;
+          signature_basis_masks_[pivot] = mask;
+          break;
+        }
+      }
+      if (!residue && mask) signature_null_masks_.push_back(mask);
+    }
+  }
+
+  std::optional<Key> solve_signature64(Key target) const {
+    if (!fast_mode()) return std::nullopt;
+    Key mask = 0;
+    for (int pivot = 63; pivot >= 0 && target; --pivot) {
+      if (!(target & (Key{1} << pivot))) continue;
+      if (!signature_basis_[pivot]) return std::nullopt;
+      target ^= signature_basis_[pivot];
+      mask ^= signature_basis_masks_[pivot];
+    }
+    return mask;
   }
 
   std::vector<Key> make_difference_basis() const {
@@ -314,12 +380,15 @@ class Searcher {
       const unsigned first_capacity = slots_ / 2;
       if (ones == 0 || ones == keys_.size() || ones > first_capacity ||
           keys_.size() - ones > first_capacity) return true;
-      if (candidates_.size() == options_.max_candidates) {
+      if (candidate_count() == options_.max_candidates) {
         candidate_limit_ = true;
         return false;
       }
       seen_behaviors_.insert(coordinate);
-      candidates_.push_back(Candidate{mask, target, scratch_});
+      if (fast_mode())
+        candidates64_.push_back(Candidate64{mask, target, scratch_[0]});
+      else
+        candidates_.push_back(Candidate{mask, target, scratch_});
       return true;
     }
     for (unsigned bit = begin; bit <= 64 - left; ++bit) {
@@ -418,6 +487,167 @@ class Searcher {
     }
   }
 
+  static bool better_fast64(const FastState64& a, const FastState64& b) {
+    if (a.taps != b.taps) return a.taps < b.taps;
+    if (a.squared_occupancy != b.squared_occupancy)
+      return a.squared_occupancy < b.squared_occupancy;
+    for (unsigned i = 0; i < a.row_count && i < b.row_count; ++i) {
+      if (a.rows[i] != b.rows[i]) return a.rows[i] < b.rows[i];
+    }
+    return a.row_count < b.row_count;
+  }
+
+  void retain_fast64(std::vector<FastState64>& beam, FastState64&& state) const {
+    if (beam.size() < options_.beam_width) {
+      beam.push_back(std::move(state));
+      return;
+    }
+    auto worst = std::max_element(beam.begin(), beam.end(), better_fast64);
+    if (better_fast64(state, *worst)) *worst = std::move(state);
+  }
+
+  bool complete_last_fast64(const FastState64& state) {
+    if (state.group_count != 32 || state.row_count != 5) return false;
+    Key target = 0;
+    for (unsigned g = 0; g < state.group_count; ++g) {
+      const Key pair = state.groups[g];
+      if (__builtin_popcountll(pair) != 2) return false;
+      target |= pair & (~pair + 1);
+    }
+
+    auto try_target = [&](Key signature) {
+      const auto mask = solve_signature64(signature);
+      if (!mask || *mask == 0) return false;
+      std::vector<Key> rows;
+      rows.reserve(6);
+      for (unsigned i = 0; i < state.row_count; ++i)
+        rows.push_back(candidates64_[state.rows[i]].mask);
+      rows.push_back(*mask);
+      if (!verify(rows)) return false;
+      // Adding any earlier output row to the final row only relabels IDs.
+      // Also try input masks with identical behavior (the signature kernel).
+      Key cheapest = *mask;
+      for (unsigned subset = 0; subset < (1U << state.row_count); ++subset) {
+        Key variant = *mask;
+        for (unsigned i = 0; i < state.row_count; ++i)
+          if (subset & (1U << i)) variant ^= rows[i];
+        if (popcount(variant) < popcount(cheapest)) cheapest = variant;
+        // Bound enumeration when the input nullspace is large.
+        const unsigned null_count = std::min<unsigned>(signature_null_masks_.size(), 8);
+        for (unsigned ns = 1; ns < (1U << null_count); ++ns) {
+          Key equivalent = variant;
+          for (unsigned i = 0; i < null_count; ++i)
+            if (ns & (1U << i)) equivalent ^= signature_null_masks_[i];
+          if (popcount(equivalent) < popcount(cheapest)) cheapest = equivalent;
+        }
+      }
+      rows.back() = cheapest;
+      if (!verify(rows)) throw std::runtime_error("completion relabel verification failed");
+      const unsigned taps = state.taps + popcount(cheapest);
+      if (!best_rows_ || taps < best_taps_) {
+        best_taps_ = taps;
+        best_rows_ = std::move(rows);
+      }
+      return true;
+    };
+
+    if (try_target(target)) return true;
+    // 对 codimension-1 的 signature span，一次翻转一个 pair 的方向就能
+    // 覆盖另一种 parity；逐 pair 尝试仍然只需 32 次 GF(2) 回代。
+    for (unsigned g = 0; g < state.group_count; ++g) {
+      if (try_target(target ^ state.groups[g])) return true;
+    }
+    return false;
+  }
+
+  // 64-pattern 快路径。groups[g] 是当前 prefix 的一个 pattern 集合，候选
+  // signature 与其相交后直接得到下一层的两个子集合。
+  void search_fast64(Stage& stage) {
+    if (output_bits_ > 6 || keys_.size() > 64) {
+      search_beam(stage);
+      return;
+    }
+    const std::uint64_t all_keys = keys_.size() == 64
+        ? ~std::uint64_t{0}
+        : ((std::uint64_t{1} << keys_.size()) - 1);
+    std::vector<FastState64> beam;
+    FastState64 root;
+    root.groups[0] = all_keys;
+    beam.push_back(root);
+    for (unsigned depth = 0; depth < output_bits_; ++depth) {
+      std::vector<FastState64> next;
+      const unsigned capacity = slots_ >> (depth + 1);
+      if (keys_.size() == 64 && output_bits_ == 6 && depth == 5) {
+        bool found = false;
+        for (const auto& state : beam) {
+          if ((++stage.checked & 0x3fff) == 0 && Clock::now() >= deadline_) {
+            timed_out_ = true;
+            return;
+          }
+          found = complete_last_fast64(state) || found;
+        }
+        if (found) stage.deepest = output_bits_;
+        stage.complete = true;
+        return;
+      }
+      for (const auto& state : beam) {
+        const unsigned begin = state.row_count == 0 ? 0 : state.rows[state.row_count - 1] + 1;
+        if (candidates64_.size() - begin < output_bits_ - depth) continue;
+        for (unsigned ci = begin; ci < candidates64_.size(); ++ci) {
+          if ((++stage.checked & 0x3fff) == 0 && Clock::now() >= deadline_) {
+            timed_out_ = true;
+            return;
+          }
+          const auto& candidate = candidates64_[ci];
+          if (best_rows_ && state.taps + candidate.weight +
+                                (output_bits_ - depth - 1) >= best_taps_)
+            continue;
+          const std::uint64_t signature = candidate.signature;
+          FastState64 child = state;
+          child.group_count = 0;
+          child.row_count = state.row_count + 1;
+          child.rows[state.row_count] = ci;
+          child.taps = state.taps + candidate.weight;
+          child.squared_occupancy = 0;
+          bool valid = true;
+          for (unsigned g = 0; g < state.group_count; ++g) {
+            const std::uint64_t ones = state.groups[g] & signature;
+            const unsigned one_count = static_cast<unsigned>(__builtin_popcountll(ones));
+            const unsigned group_size = static_cast<unsigned>(
+                __builtin_popcountll(state.groups[g]));
+            const unsigned zero_count = group_size - one_count;
+            if (one_count > capacity || zero_count > capacity) {
+              valid = false;
+              break;
+            }
+            child.groups[child.group_count++] = ones;
+            child.groups[child.group_count++] = state.groups[g] ^ ones;
+            child.squared_occupancy += std::uint64_t(one_count) * one_count +
+                                       std::uint64_t(zero_count) * zero_count;
+          }
+          if (valid) retain_fast64(next, std::move(child));
+        }
+      }
+      if (next.empty()) {
+        stage.complete = true;
+        return;
+      }
+      beam = std::move(next);
+      stage.deepest = depth + 1;
+    }
+    stage.complete = true;
+    for (const auto& state : beam) {
+      if (best_rows_ && state.taps >= best_taps_) continue;
+      std::vector<Key> rows;
+      rows.reserve(output_bits_);
+      for (unsigned i = 0; i < state.row_count; ++i)
+        rows.push_back(candidates64_[state.rows[i]].mask);
+      if (!verify(rows)) throw std::runtime_error("fast beam verification failed");
+      best_taps_ = state.taps;
+      best_rows_ = std::move(rows);
+    }
+  }
+
   std::string result_json() const {
     std::ostringstream out;
     out << "{\"status\":\"" << status_ << "\",\"method\":\"" << method_
@@ -429,8 +659,10 @@ class Searcher {
         << ",\"signature_rank\":" << signature_rank_
         << ",\"max_cap\":" << options_.max_cap
         << ",\"beam_width\":" << options_.beam_width
-        << ",\"candidates\":" << candidates_.size()
+        << ",\"candidates\":" << candidate_count()
         << ",\"generated_masks\":" << generated_masks_
+        << ",\"completion_last_row_unbounded\":"
+        << (keys_.size() == 64 && output_bits_ == 6 ? "true" : "false")
         << ",\"elapsed_seconds\":"
         << std::chrono::duration<double>(Clock::now() - start_).count()
         << ",\"proof_scope\":\"heuristic beam; only taps==output_bits reaches the trivial lower bound\""
