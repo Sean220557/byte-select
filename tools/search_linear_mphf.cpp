@@ -209,6 +209,7 @@ class Searcher {
         column |= static_cast<Signature>(((keys_[i] >> bit) & 1ULL) << i);
       columns_[bit] = column;
     }
+    build_signature_solver();
   }
 
   // 功能：驱动整个搜索过程：对不超过 max_cap 的每个 cap，枚举新权重的候选，
@@ -268,6 +269,8 @@ class Searcher {
   const std::array<Key, kKeys>& keys_;
   const Options& options_;
   std::array<Signature, 64> columns_{};
+  std::array<Signature, 32> signature_basis_{};
+  std::array<Key, 32> signature_basis_masks_{};
   std::unordered_map<Signature, Candidate> by_signature_;
   std::vector<Candidate> pool_;
   std::array<Key, kRows> chosen_{};
@@ -291,6 +294,35 @@ class Searcher {
   void check_deadline() {
     if ((enumerated_ & 0x3ff) == 0 && Clock::now() >= deadline_)
       stop_ = StopReason::Time;
+  }
+
+  void build_signature_solver() {
+    for (unsigned bit = 0; bit < 64; ++bit) {
+      Signature residue = columns_[bit];
+      Key mask = Key{1} << bit;
+      for (int pivot = 31; pivot >= 0 && residue; --pivot) {
+        if (!(residue & (Signature{1} << pivot))) continue;
+        if (signature_basis_[pivot]) {
+          residue ^= signature_basis_[pivot];
+          mask ^= signature_basis_masks_[pivot];
+        } else {
+          signature_basis_[pivot] = residue;
+          signature_basis_masks_[pivot] = mask;
+          break;
+        }
+      }
+    }
+  }
+
+  std::optional<Key> solve_signature(Signature target) const {
+    Key mask = 0;
+    for (int pivot = 31; pivot >= 0 && target; --pivot) {
+      if (!(target & (Signature{1} << pivot))) continue;
+      if (!signature_basis_[pivot]) return std::nullopt;
+      target ^= signature_basis_[pivot];
+      mask ^= signature_basis_masks_[pivot];
+    }
+    return mask;
   }
 
   // 功能：递归枚举所有恰好含有 'target' 个 tap 的输入 mask，并把它们的
@@ -423,6 +455,37 @@ class Searcher {
     return result;
   }
 
+  bool complete_last_row(const std::vector<std::uint32_t>& groups,
+                         unsigned cost) {
+    if (groups.size() != 16) return false;
+    Signature target = 0;
+    for (const auto group : groups) {
+      if (popcount32(group) != 2) return false;
+      target |= group & (~group + 1U);
+    }
+
+    bool found = false;
+    auto try_target = [&](Signature signature) {
+      const auto mask = solve_signature(signature);
+      if (!mask || *mask == 0) return false;
+      bool local = false;
+      for (unsigned subset = 0; subset < (1U << (kRows - 1)); ++subset) {
+        Key variant = *mask;
+        for (unsigned row = 0; row + 1 < kRows; ++row)
+          if (subset & (1U << row)) variant ^= chosen_[row];
+        chosen_[kRows - 1] = variant;
+        save_best(cost + popcount64(variant));
+        local = true;
+      }
+      return local;
+    };
+
+    found = try_target(target) || found;
+    for (unsigned group = 0; group < groups.size(); ++group)
+      found = try_target(target ^ groups[group]) || found;
+    return found;
+  }
+
   // 功能：在固定的候选池中深度优先搜索 5 行。'pool' 保存与每个已选前缀均
   // 兼容的 pool_ 下标（按递增顺序）；'groups' 是当前的 sample partition；
   // 'depth' 是已固定行数；'cost' 是它们合并后的 tap 权重。
@@ -442,6 +505,8 @@ class Searcher {
     }
     const unsigned remaining = kRows - depth;
     if (pool.size() < remaining || improves_bound(cost, remaining, pool, 0)) return;
+
+    if (remaining == 1 && complete_last_row(groups, cost)) return;
 
     for (std::size_t j = 0; j < pool.size(); ++j) {
       if (stop_ != StopReason::None) return;
