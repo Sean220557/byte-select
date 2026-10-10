@@ -551,13 +551,13 @@ class Searcher {
       return true;
     };
 
-    if (try_target(target)) return true;
+    bool found = try_target(target);
     // 对 codimension-1 的 signature span，一次翻转一个 pair 的方向就能
     // 覆盖另一种 parity；逐 pair 尝试仍然只需 32 次 GF(2) 回代。
     for (unsigned g = 0; g < state.group_count; ++g) {
-      if (try_target(target ^ state.groups[g])) return true;
+      found = try_target(target ^ state.groups[g]) || found;
     }
-    return false;
+    return found;
   }
 
   // 64-pattern 快路径。groups[g] 是当前 prefix 的一个 pattern 集合，候选
