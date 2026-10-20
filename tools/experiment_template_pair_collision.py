@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prune short motifs and two-run values, then build templates and a linear map."""
+"""Prune byte-RLE and compact motifs, then build templates and a linear map."""
 from __future__ import annotations
 
 import argparse
@@ -46,6 +46,36 @@ def runs(tags: tuple[int, ...]) -> list[tuple[int, int]]:
         else:
             result.append((tag, 1))
     return result
+
+
+def encode_byte_rle(key: int) -> tuple[list[tuple[int, int, int]], int] | None:
+    """Encode maximal identical-byte runs of length >=4; leave other bytes literal."""
+    data = key.to_bytes(8, "big")
+    encoded: list[tuple[int, int, int]] = []
+    start = 0
+    while start < 8:
+        end = start + 1
+        while end < 8 and data[end] == data[start]:
+            end += 1
+        length = end - start
+        if length >= 4:
+            encoded.append((start, data[start], length))
+        start = end
+    if not encoded:
+        return None
+    restored: list[int | None] = [None] * 8
+    for position, byte, length in encoded:
+        for offset in range(position, position + length):
+            restored[offset] = byte
+    for position in range(8):
+        if restored[position] is None:
+            restored[position] = data[position]
+    if bytes(int(byte) for byte in restored) != data:
+        raise AssertionError("Byte-RLE codec failed round trip")
+    covered = sum(length for _, _, length in encoded)
+    # 2-bit mode + 3-bit run count + 3-bit start + 8-bit value + 3-bit (len-4)
+    # per run, plus 8 bits for each byte outside encoded runs.
+    return encoded, 5 + 14 * len(encoded) + 8 * (8 - covered)
 
 
 @dataclass(frozen=True)
@@ -133,8 +163,20 @@ def prune_keys() -> tuple[list[int], list[dict], int]:
     residual = []
     removed = []
     for index, key in enumerate(merged):
+        byte_rle = encode_byte_rle(key)
         periodic = encode_periodic(key)
-        if periodic is not None:
+        if byte_rle is not None:
+            encoded_runs, bits = byte_rle
+            removed.append({"merged_index": index, "raw_hex": f"{key:016X}",
+                            "run_count": len(runs(unpack_tags(key))),
+                            "periodic_motif_nibbles": "", "motif_hex": "",
+                            "exception_index": "", "exception_value_hex": "",
+                            "encoded_bits": bits, "reason": "repeated_byte_run_at_least_4",
+                            "byte_rle_run_count": len(encoded_runs),
+                            "byte_rle_runs": ";".join(
+                                f"start={start},value={value:02X},length={length}"
+                                for start, value, length in encoded_runs)})
+        elif periodic is not None:
             period, motif, exception_index, exception_value, bits = periodic
             if decode_periodic(period, motif, exception_index, exception_value) != key:
                 raise AssertionError("Periodic motif failed round trip")
@@ -148,7 +190,9 @@ def prune_keys() -> tuple[list[int], list[dict], int]:
                             "encoded_bits": bits,
                             "reason": ("periodic_1_2_nibbles_one_exception"
                                        if exception_index is not None else
-                                       "periodic_1_2_nibbles")})
+                                       "periodic_1_2_nibbles"),
+                            "byte_rle_run_count": 0,
+                            "byte_rle_runs": ""})
         elif (two_run := encode_two_run(key)) is not None:
             first, second, split = two_run
             removed.append({"merged_index": index, "raw_hex": f"{key:016X}",
@@ -156,7 +200,9 @@ def prune_keys() -> tuple[list[int], list[dict], int]:
                             "motif_hex": f"{first:X}{second:X}",
                             "exception_index": split,
                             "exception_value_hex": "", "encoded_bits": 12,
-                            "reason": "two_nibble_runs"})
+                            "reason": "two_nibble_runs",
+                            "byte_rle_run_count": 0,
+                            "byte_rle_runs": ""})
         else:
             residual.append(key)
     return residual, removed, len(merged)
@@ -515,9 +561,23 @@ def main() -> None:
                                                   "run_count", "periodic_motif_nibbles",
                                                   "motif_hex", "exception_index",
                                                   "exception_value_hex", "encoded_bits",
-                                                  "reason"])
+                                                  "reason", "byte_rle_run_count",
+                                                  "byte_rle_runs"])
         writer.writeheader()
         writer.writerows(removed)
+    # Flatten the two codebooks while preserving first-seen order.
+    all_merged = list(dict.fromkeys(
+        load_codebook(ROOT / "results/mphf-32/codebook1.txt")
+        + load_codebook(ROOT / "results/mphf-32/codebook2.txt")))
+    with (OUT / "rle_byte_run_audit.csv").open("w", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["raw_hex", "byte_runs_at_least_4", "eligible"])
+        for raw in all_merged:
+            encoded = encode_byte_rle(raw)
+            encoded_runs = encoded[0] if encoded else []
+            writer.writerow([f"{raw:016X}", ";".join(
+                f"start={start},value={value:02X},length={length}"
+                for start, value, length in encoded_runs), bool(encoded)])
     with (OUT / "templates.csv").open("w", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow(["template_id", "members_raw_hex", "member_count",
@@ -543,6 +603,8 @@ def main() -> None:
             for member in template.members:
                 raw = keys[member]
                 period, motif, exceptions, bits = best_residual_motif(raw)
+                if encode_byte_rle(raw) is not None:
+                    raise AssertionError("Eligible repeated-byte run reached templates")
                 if encode_periodic(raw) is not None:
                     raise AssertionError("Eligible 1/2-nibble pattern survived into template")
                 run_list = runs(unpack_tags(raw))
@@ -606,12 +668,14 @@ def main() -> None:
         "input_codebooks": ["results/mphf-32/codebook1.txt",
                             "results/mphf-32/codebook2.txt"],
         "merged_unique": merged_count,
-        "pruning_policy": "exact or one-exception 1/2-nibble motif, or exactly two nibble runs; preserve multi-run and 4-nibble templates",
+        "pruning_policy": "maximal identical-byte runs of length >=4, exact/one-exception 1/2-nibble motifs, or exactly two nibble runs; preserve other multi-run patterns",
         "rle_pruned": len(removed),
         "rle_exact_periodic_pruned": sum(
             r["reason"] == "periodic_1_2_nibbles" for r in removed),
         "rle_one_exception_pruned": sum(
             r["reason"] == "periodic_1_2_nibbles_one_exception" for r in removed),
+        "rle_repeated_byte_run_at_least_4_pruned": sum(
+            r["reason"] == "repeated_byte_run_at_least_4" for r in removed),
         "rle_two_run_pruned": sum(r["reason"] == "two_nibble_runs" for r in removed),
         "residual_patterns": len(keys),
         "periodic_motif_codec_roundtrip_verified": True,

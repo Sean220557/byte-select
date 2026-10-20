@@ -4,11 +4,12 @@
     "results/mphf-32/codebook2.txt"
   ],
   "merged_unique": 63,
-  "pruning_policy": "exact or one-exception 1/2-nibble motif, or exactly two nibble runs; preserve multi-run and 4-nibble templates",
+  "pruning_policy": "maximal identical-byte runs of length >=4, exact/one-exception 1/2-nibble motifs, or exactly two nibble runs; preserve other multi-run patterns",
   "rle_pruned": 16,
-  "rle_exact_periodic_pruned": 12,
-  "rle_one_exception_pruned": 3,
-  "rle_two_run_pruned": 1,
+  "rle_exact_periodic_pruned": 0,
+  "rle_one_exception_pruned": 0,
+  "rle_repeated_byte_run_at_least_4_pruned": 16,
+  "rle_two_run_pruned": 0,
   "residual_patterns": 47,
   "periodic_motif_codec_roundtrip_verified": true,
   "all_pruned_modes_roundtrip_verified": true,
@@ -131,7 +132,7 @@
     "output_bits": 3,
     "xor2": 0,
     "taps": 3,
-    "zero_xor_exhaustive": true
+    "zero_xor_exhaustive": false
   },
   "search_attempts": [
     {
