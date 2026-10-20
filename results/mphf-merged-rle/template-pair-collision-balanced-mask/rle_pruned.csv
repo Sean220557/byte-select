@@ -1,0 +1,17 @@
+merged_index,raw_hex,run_count,periodic_motif_nibbles,motif_hex,exception_index,exception_value_hex,encoded_bits,reason
+0,FFFFFFFFFFFFFFFF,1,1,F,,,6,periodic_1_2_nibbles
+1,0000000000000000,1,1,0,,,6,periodic_1_2_nibbles
+3,B0B0B0B0B0B0B0B0,16,2,B0,,,10,periodic_1_2_nibbles
+4,0B0B0B0B0B0B0B0B,16,2,0B,,,10,periodic_1_2_nibbles
+5,BBBBBBBBBBBBBBBB,1,1,B,,,6,periodic_1_2_nibbles
+6,F1F1F1F1F1F1F1F1,16,2,F1,,,10,periodic_1_2_nibbles
+7,1F1F1F1F1F1F1F1F,16,2,1F,,,10,periodic_1_2_nibbles
+9,FFFFFF0000000000,2,,F0,6,,12,two_nibble_runs
+10,1111111111111111,1,1,1,,,6,periodic_1_2_nibbles
+20,3F3F3F3F3F3F3F3F,16,2,3F,,,10,periodic_1_2_nibbles
+21,1B1B1B1B1B1B1B1F,16,2,1B,15,F,18,periodic_1_2_nibbles_one_exception
+22,1717171717171717,16,2,17,,,10,periodic_1_2_nibbles
+23,1B1B1B1B1B1B1B1B,16,2,1B,,,10,periodic_1_2_nibbles
+24,7F7F7F7F7F7F7F7F,16,2,7F,,,10,periodic_1_2_nibbles
+25,0B0B0B0B0B0B0B02,16,2,0B,15,2,18,periodic_1_2_nibbles_one_exception
+26,BBBBBBBBBBBBBBB2,2,1,B,15,2,14,periodic_1_2_nibbles_one_exception
